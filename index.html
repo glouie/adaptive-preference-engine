@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Adaptive Preference Engine</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d2e;
+    --surface2: #242740;
+    --border: #2e3250;
+    --accent: #6c63ff;
+    --accent2: #a78bfa;
+    --green: #10b981;
+    --yellow: #f59e0b;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --code-bg: #0d1117;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+
+  /* HEADER */
+  .header { background: linear-gradient(135deg, #1a1d2e 0%, #242740 100%); border-bottom: 1px solid var(--border); padding: 24px 32px; display: flex; align-items: center; gap: 16px; }
+  .header-icon { width: 48px; height: 48px; background: linear-gradient(135deg, var(--accent), var(--accent2)); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; }
+  .header h1 { font-size: 22px; font-weight: 700; background: linear-gradient(135deg, #e2e8f0, var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .header p { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .badge { background: var(--accent); color: white; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 99px; margin-left: 12px; text-transform: uppercase; letter-spacing: 0.5px; vertical-align: middle; }
+
+  /* LAYOUT */
+  .layout { display: flex; height: calc(100vh - 85px); }
+  .sidebar { width: 240px; flex-shrink: 0; background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 16px 8px; }
+  .main { flex: 1; overflow-y: auto; padding: 32px; }
+
+  /* SIDEBAR */
+  .sidebar-section { margin-bottom: 20px; }
+  .sidebar-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); padding: 4px 12px 8px; }
+  .sidebar-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--muted); transition: all 0.15s; border: none; background: none; width: 100%; text-align: left; }
+  .sidebar-item:hover { background: var(--surface2); color: var(--text); }
+  .sidebar-item.active { background: rgba(108, 99, 255, 0.15); color: var(--accent2); font-weight: 600; }
+  .sidebar-item .icon { font-size: 15px; flex-shrink: 0; }
+
+  /* PAGES */
+  .page { display: none; }
+  .page.active { display: block; }
+
+  /* OVERVIEW */
+  .hero { background: linear-gradient(135deg, rgba(108,99,255,0.1), rgba(167,139,250,0.05)); border: 1px solid rgba(108,99,255,0.2); border-radius: 16px; padding: 32px; margin-bottom: 28px; }
+  .hero h2 { font-size: 28px; font-weight: 800; margin-bottom: 8px; }
+  .hero p { color: var(--muted); font-size: 15px; line-height: 1.7; max-width: 600px; }
+  .hero blockquote { margin-top: 20px; border-left: 3px solid var(--accent); padding-left: 16px; font-style: italic; color: var(--accent2); font-size: 15px; }
+
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
+  .stat-card .num { font-size: 32px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .stat-card .label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  .features-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 28px; }
+  .feature-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .feature-card h4 { font-size: 14px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .feature-card p { font-size: 13px; color: var(--muted); line-height: 1.6; }
+
+  /* CARDS */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+  .card h3 { font-size: 16px; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  .card-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 12px; }
+
+  /* CODE */
+  pre, code { font-family: 'Fira Code', 'Cascadia Code', 'Courier New', monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; font-size: 12px; line-height: 1.7; color: #c9d1d9; margin: 12px 0; }
+  code { background: rgba(108,99,255,0.15); color: var(--accent2); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+  /* TABLE */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 14px; background: var(--surface2); color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  /* BADGES */
+  .tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px; }
+  .tag-green { background: rgba(16,185,129,0.15); color: var(--green); }
+  .tag-blue { background: rgba(59,130,246,0.15); color: var(--blue); }
+  .tag-purple { background: rgba(108,99,255,0.15); color: var(--accent2); }
+  .tag-yellow { background: rgba(245,158,11,0.15); color: var(--yellow); }
+
+  /* CHECKLIST */
+  .checklist { list-style: none; }
+  .checklist li { padding: 6px 0; font-size: 13px; display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  .checklist li.done { color: var(--text); }
+  .checklist li .check { color: var(--green); font-size: 14px; }
+  .checklist li .x { color: var(--red); font-size: 14px; }
+
+  /* FLOW */
+  .flow { display: flex; align-items: center; gap: 0; margin: 16px 0; flex-wrap: wrap; }
+  .flow-step { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; font-size: 12px; font-weight: 600; }
+  .flow-arrow { color: var(--muted); padding: 0 8px; font-size: 18px; }
+
+  /* FILE TREE */
+  .tree { font-family: monospace; font-size: 13px; line-height: 1.8; }
+  .tree .dir { color: var(--accent2); font-weight: 700; }
+  .tree .file { color: var(--muted); }
+  .tree .file:hover { color: var(--text); cursor: pointer; }
+  .tree .comment { color: #4a5568; font-style: italic; }
+
+  /* SIGNALS */
+  .signal { border-radius: 10px; padding: 14px 18px; margin: 10px 0; border-left: 3px solid; }
+  .signal-correction { background: rgba(239,68,68,0.08); border-color: var(--red); }
+  .signal-feedback { background: rgba(16,185,129,0.08); border-color: var(--green); }
+  .signal-usage { background: rgba(59,130,246,0.08); border-color: var(--blue); }
+  .signal h5 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .signal p { font-size: 12px; color: var(--muted); }
+
+  /* PROGRESS BAR */
+  .progress-wrap { margin: 8px 0; }
+  .progress-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .progress { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; }
+  .progress-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 1s ease; }
+
+  /* PHASE TRACKER */
+  .phase-track { display: flex; gap: 12px; margin: 20px 0; }
+  .phase { flex: 1; border-radius: 10px; padding: 16px; border: 1px solid var(--border); text-align: center; }
+  .phase.done { border-color: var(--green); background: rgba(16,185,129,0.05); }
+  .phase.next { border-color: var(--accent); background: rgba(108,99,255,0.05); }
+  .phase.future { opacity: 0.4; }
+  .phase .ph-num { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; color: var(--muted); }
+  .phase .ph-title { font-size: 13px; font-weight: 700; }
+  .phase.done .ph-num { color: var(--green); }
+  .phase.next .ph-num { color: var(--accent); }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+  /* PAGE TITLE */
+  .page-title { font-size: 22px; font-weight: 800; margin-bottom: 8px; }
+  .page-sub { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+
+  /* SECTION TITLE */
+  .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 24px 0 12px; display: flex; align-items: center; gap: 8px; }
+  .section-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  /* COPY BUTTON */
+  .copy-btn { float: right; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; transition: all 0.15s; }
+  .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+  .code-wrap { position: relative; }
+
+  @media (max-width: 768px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .features-grid { grid-template-columns: 1fr; }
+    .sidebar { width: 200px; }
+    .main { padding: 20px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">🧠</div>
+  <div>
+    <h1>Adaptive Preference Engine <span class="badge">Phase 1</span></h1>
+    <p>Behavior-driven preference learning system · Grows with your habits</p>
+  </div>
+</div>
+
+<div class="layout">
+  <!-- SIDEBAR -->
+  <nav class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Overview</div>
+      <button class="sidebar-item active" onclick="showPage('overview')">
+        <span class="icon">🏠</span> Overview
+      </button>
+      <button class="sidebar-item" onclick="showPage('architecture')">
+        <span class="icon">🏗️</span> Architecture
+      </button>
+      <button class="sidebar-item" onclick="showPage('signals')">
+        <span class="icon">📡</span> How It Learns
+      </button>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">Code</div>
+      <button class="sidebar-item" onclick="showPage('modules')">
+        <span class="icon">📦</span> Modules
+      </button>
+      <button class="sidebar-item" onclick="showPage('agent')">
+        <span class="icon">🤖</span> Agent Integration
+      </button>
+      <button class="sidebar-item" onclick="showPage('cli')">
+        <span class="icon">⌨️</span> CLI Reference
+      </button>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">Docs</div>
+      <button class="sidebar-item" onclick="showPage('quickstart')">
+        <span class="icon">🚀</span> Quickstart
+      </button>
+      <button class="sidebar-item" onclick="showPage('evaluations')">
+        <span class="icon">📊</span> Evaluations
+      </button>
+      <button class="sidebar-item" onclick="showPage('roadmap')">
+        <span class="icon">🗺️</span> Roadmap
+      </button>
+    </div>
+  </nav>
+
+  <!-- MAIN -->
+  <main class="main">
+
+    <!-- ===== OVERVIEW ===== -->
+    <div class="page active" id="page-overview">
+      <div class="hero">
+        <h2>🧠 Not a preference tracker. A preference <em>learner</em>.</h2>
+        <p>The Adaptive Preference Engine watches how you interact with AI, detects patterns in your corrections and feedback, and builds a growing model of what you actually prefer — not just what you say you prefer.</p>
+        <blockquote>"Your preferences aren't what you say. They're what you do."</blockquote>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="num">14</div>
+          <div class="label">Python Modules</div>
+        </div>
+        <div class="stat-card">
+          <div class="num">3</div>
+          <div class="label">Signal Types</div>
+        </div>
+        <div class="stat-card">
+          <div class="num">3</div>
+          <div class="label">Context Levels</div>
+        </div>
+        <div class="stat-card">
+          <div class="num">✅</div>
+          <div class="label">Phase 1 Complete</div>
+        </div>
+      </div>
+
+      <div class="features-grid">
+        <div class="feature-card">
+          <h4>🔗 Bidirectional Associations</h4>
+          <p>Preferences link to other preferences with <strong>independent strengths in each direction</strong>. Asymmetrical by design — just like real learning.</p>
+        </div>
+        <div class="feature-card">
+          <h4>📈 Dynamic Strength Evolution</h4>
+          <p>Association strength isn't static. It evolves via <code>frequency × trend × emotion × recency</code>. 2% time decay prevents stale preferences.</p>
+        </div>
+        <div class="feature-card">
+          <h4>🧱 Context Stacking</h4>
+          <p>Base → Project → Conversation. Each level overrides the previous. Project-specific habits don't pollute your global defaults.</p>
+        </div>
+        <div class="feature-card">
+          <h4>🤖 Agent-Ready</h4>
+          <p>One-line integration. Preferences inject directly into agent prompts. Corrections loop back as learning signals automatically.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Phase 1 Completion Checklist</div>
+        <ul class="checklist">
+          <li class="done"><span class="check">✓</span> Core data models (Preference, Association, ContextStack, Signal)</li>
+          <li class="done"><span class="check">✓</span> JSONL storage with full CRUD</li>
+          <li class="done"><span class="check">✓</span> Option C preference loading (diminishing confidence chains)</li>
+          <li class="done"><span class="check">✓</span> Bidirectional associations with asymmetrical strength</li>
+          <li class="done"><span class="check">✓</span> Context stacking (base / project / conversation)</li>
+          <li class="done"><span class="check">✓</span> Signal processing (corrections + feedback)</li>
+          <li class="done"><span class="check">✓</span> Dynamic strength calculation with Bayesian updates</li>
+          <li class="done"><span class="check">✓</span> Time decay for stale preferences</li>
+          <li class="done"><span class="check">✓</span> Emotional signal detection from message text</li>
+          <li class="done"><span class="check">✓</span> Full CLI interface</li>
+          <li class="done"><span class="check">✓</span> Agent integration hooks + middleware</li>
+          <li class="done"><span class="check">✓</span> Working demo + complete documentation</li>
+          <li class="done"><span class="check">✓</span> SME evaluation reports (2 iterations)</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ===== ARCHITECTURE ===== -->
+    <div class="page" id="page-architecture">
+      <div class="page-title">🏗️ Architecture</div>
+      <div class="page-sub">How the engine is structured and how data flows through it</div>
+
+      <div class="card">
+        <h3>📊 Data Flow</h3>
+        <div class="flow">
+          <div class="flow-step">👤 User / Agent</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">🔄 Preference Loader</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">🤖 Agent Response</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">📡 Signal Processor</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">💾 Storage</div>
+        </div>
+        <p style="font-size:13px; color: var(--muted); margin-top:12px;">Corrections/Feedback/Usage all feed back into Signal Processor → updating association strengths and confidence levels</p>
+      </div>
+
+      <div class="card">
+        <h3>🧭 Preference Hierarchy</h3>
+        <pre>communication/
+  output_format        (selector)
+    ├── bullets        (variant) ← confidence: dynamic
+    ├── table          (variant) ← confidence: dynamic
+    └── prose          (variant) ← confidence: dynamic
+
+coding/
+  language             (selector)
+    ├── python         (variant)
+    └── javascript     (variant)
+  framework            (selector)
+    └── fastapi        (variant)</pre>
+        <p style="font-size:13px; color: var(--muted);">Three types: <code>selector</code> (parent), <code>variant</code> (option), <code>toggle</code> (on/off)</p>
+      </div>
+
+      <div class="card">
+        <h3>🔗 Asymmetrical Associations</h3>
+        <pre>table ─────────────────→ data_structure_clarity  (strength: 0.95)
+     ←──────────────────                           (strength: 0.50)
+
+Why asymmetrical?
+  table → data_structure: STRONG  (tables explain structure well)
+  data_structure → table: WEAKER  (structure doesn't always need tables)</pre>
+      </div>
+
+      <div class="card">
+        <h3>📚 Context Stack</h3>
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+          <div style="background: rgba(108,99,255,0.1); border: 1px solid rgba(108,99,255,0.3); border-radius: 8px; padding: 12px; font-size: 13px;">
+            <strong>Conversation level</strong> <span style="color: var(--muted)">(highest priority)</span><br>
+            <span style="color: var(--muted);">Overrides everything for this chat session</span>
+          </div>
+          <div style="background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 8px; padding: 12px; font-size: 13px;">
+            <strong>Project level</strong><br>
+            <span style="color: var(--muted);">Habits specific to a codebase or project</span>
+          </div>
+          <div style="background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2); border-radius: 8px; padding: 12px; font-size: 13px;">
+            <strong>Base level</strong> <span style="color: var(--muted)">(always active)</span><br>
+            <span style="color: var(--muted);">Your global defaults across all contexts</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>⚗️ Strength Formula</h3>
+        <pre>strength = frequency × trend × emotion × recency
+
+Where:
+  frequency  = how often used            (0 → 1)
+  trend      = direction of change       (0.70 → 1.15)
+  emotion    = user satisfaction         (0.50 → 1.00)
+  recency    = time decay                (2% per day unused)</pre>
+      </div>
+
+      <div class="card">
+        <h3>📁 File Structure</h3>
+        <div class="tree">
+          <div><span class="dir">adaptive-preference-engine/</span></div>
+          <div>&nbsp;&nbsp;<span class="dir">scripts/</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">models.py</span> <span class="comment">— Data models (Preference, Association, Signal)</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">storage.py</span> <span class="comment">— JSONL file persistence and queries</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">preference_loader.py</span> <span class="comment">— Option C loading with diminishing confidence</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">signal_processor.py</span> <span class="comment">— Process corrections/feedback, update strengths</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">bayesian_strength_calculator.py</span> <span class="comment">— Bayesian strength updates</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">pattern_analyzer.py</span> <span class="comment">— Detect patterns in signal history</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">trend_predictor.py</span> <span class="comment">— Predict preference direction</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">auto_detector.py</span> <span class="comment">— Auto-detect new preference categories</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">agentic_loops.py</span> <span class="comment">— Agentic feedback loop management</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">concurrency_control.py</span> <span class="comment">— Thread-safe operations</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">suggestion_engine.py</span> <span class="comment">— Surface preference suggestions</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">user_control_panel.py</span> <span class="comment">— User-facing control interface</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">user_feedback_system.py</span> <span class="comment">— Feedback collection and processing</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">agent_hook.py</span> <span class="comment">— Agent integration point</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">cli.py</span> <span class="comment">— Full command-line interface</span></div>
+          <div>&nbsp;&nbsp;<span class="file">demo.py</span> <span class="comment">— Working workflow demo</span></div>
+          <div>&nbsp;&nbsp;<span class="dir">docs/</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">FRAMEWORKS/</span> <span class="comment">— SME evaluation frameworks</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">ITERATION1_EVALUATION/</span> <span class="comment">— Round 1 SME reports</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">ITERATION2_EVALUATION/</span> <span class="comment">— Round 2 SME reports</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">IMPLEMENTATION/</span> <span class="comment">— Phase 0 implementation summary</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== SIGNALS ===== -->
+    <div class="page" id="page-signals">
+      <div class="page-title">📡 How It Learns</div>
+      <div class="page-sub">Three signal types drive all learning in the engine</div>
+
+      <div class="signal signal-correction">
+        <h5>🔴 Correction Signal (Strongest)</h5>
+        <p>When the agent proposes X and you want Y. This is the primary learning moment — the system updates association strengths, increments confidence for Y, decrements for X, and records the context.</p>
+      </div>
+      <div class="signal signal-feedback">
+        <h5>🟢 Feedback Signal</h5>
+        <p>Positive or negative emotional responses like "Yes, perfect!" or "That's not what I wanted." Emotional tone is extracted and used as a multiplier on confidence scores.</p>
+      </div>
+      <div class="signal signal-usage">
+        <h5>🔵 Usage Signal (Implicit)</h5>
+        <p>What you choose over time, without explicit correction. Frequency of use contributes to the strength formula passively.</p>
+      </div>
+
+      <div class="card" style="margin-top: 24px;">
+        <h3>📖 Learning Example — Day by Day</h3>
+        <div style="margin-top: 8px;">
+          <div class="progress-wrap">
+            <div class="progress-label"><span>🗓️ Day 1 — First correction: bullets → table</span><span style="color:var(--green)">0.50</span></div>
+            <div class="progress"><div class="progress-fill" style="width: 50%"></div></div>
+          </div>
+          <div class="progress-wrap">
+            <div class="progress-label"><span>🗓️ Day 3 — Second correction: bullets → table again</span><span style="color:var(--green)">0.65</span></div>
+            <div class="progress"><div class="progress-fill" style="width: 65%"></div></div>
+          </div>
+          <div class="progress-wrap">
+            <div class="progress-label"><span>🗓️ Day 7 — Trend detected, multiplier 1.15x</span><span style="color:var(--green)">0.75</span></div>
+            <div class="progress"><div class="progress-fill" style="width: 75%"></div></div>
+          </div>
+          <div class="progress-wrap">
+            <div class="progress-label"><span>🗓️ Day 14 — "Yes, tables are perfect!" feedback</span><span style="color:var(--green)">0.88</span></div>
+            <div class="progress"><div class="progress-fill" style="width: 88%"></div></div>
+          </div>
+        </div>
+        <p style="font-size:13px; color: var(--muted); margin-top: 16px;">Result: System learns user <strong>strongly prefers tables</strong>. Next API design session auto-uses table format.</p>
+      </div>
+
+      <div class="card">
+        <h3>🔗 Option C — Diminishing Confidence Loading</h3>
+        <pre>Load primary preference (confidence: 0.88)
+  ↓ follow association (strength: 0.80) → confidence × 0.80 = 0.70
+    ↓ follow association (strength: 0.60) → confidence × 0.60 = 0.42
+      STOP — below threshold (0.45)
+
+Max depth: 3 levels
+Threshold: 0.45
+Smart discovery through association chains</pre>
+      </div>
+    </div>
+
+    <!-- ===== MODULES ===== -->
+    <div class="page" id="page-modules">
+      <div class="page-title">📦 Core Modules</div>
+      <div class="page-sub">All 14 Python modules and what they do</div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Module</th>
+            <th>Role</th>
+            <th>Key Classes</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>models.py</code></td>
+            <td>Data structures</td>
+            <td>Preference, Association, ContextStack, Signal</td>
+            <td><span class="tag tag-green">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>storage.py</code></td>
+            <td>JSONL persistence + CRUD</td>
+            <td>PreferenceStorageManager</td>
+            <td><span class="tag tag-green">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>preference_loader.py</code></td>
+            <td>Option C loading logic</td>
+            <td>PreferenceLoader</td>
+            <td><span class="tag tag-green">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>signal_processor.py</code></td>
+            <td>Process corrections/feedback</td>
+            <td>SignalProcessor</td>
+            <td><span class="tag tag-green">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>bayesian_strength_calculator.py</code></td>
+            <td>Bayesian strength updates</td>
+            <td>BayesianStrengthCalculator</td>
+            <td><span class="tag tag-blue">Extended</span></td>
+          </tr>
+          <tr>
+            <td><code>pattern_analyzer.py</code></td>
+            <td>Detect patterns in history</td>
+            <td>PatternAnalyzer</td>
+            <td><span class="tag tag-blue">Extended</span></td>
+          </tr>
+          <tr>
+            <td><code>trend_predictor.py</code></td>
+            <td>Predict preference direction</td>
+            <td>TrendPredictor</td>
+            <td><span class="tag tag-blue">Extended</span></td>
+          </tr>
+          <tr>
+            <td><code>auto_detector.py</code></td>
+            <td>Auto-detect new categories</td>
+            <td>AutoDetector</td>
+            <td><span class="tag tag-purple">Phase 2</span></td>
+          </tr>
+          <tr>
+            <td><code>agentic_loops.py</code></td>
+            <td>Agentic feedback loops</td>
+            <td>AgenticLoopManager</td>
+            <td><span class="tag tag-purple">Phase 2</span></td>
+          </tr>
+          <tr>
+            <td><code>concurrency_control.py</code></td>
+            <td>Thread-safe operations</td>
+            <td>ConcurrencyController</td>
+            <td><span class="tag tag-blue">Extended</span></td>
+          </tr>
+          <tr>
+            <td><code>suggestion_engine.py</code></td>
+            <td>Surface suggestions</td>
+            <td>SuggestionEngine</td>
+            <td><span class="tag tag-blue">Extended</span></td>
+          </tr>
+          <tr>
+            <td><code>user_control_panel.py</code></td>
+            <td>User-facing controls</td>
+            <td>UserControlPanel</td>
+            <td><span class="tag tag-blue">Extended</span></td>
+          </tr>
+          <tr>
+            <td><code>user_feedback_system.py</code></td>
+            <td>Feedback collection</td>
+            <td>UserFeedbackSystem</td>
+            <td><span class="tag tag-blue">Extended</span></td>
+          </tr>
+          <tr>
+            <td><code>agent_hook.py</code></td>
+            <td>Agent integration</td>
+            <td>AgentPreferenceHook, AgentPreferenceMiddleware</td>
+            <td><span class="tag tag-green">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>cli.py</code></td>
+            <td>CLI interface</td>
+            <td>Full argparse CLI</td>
+            <td><span class="tag tag-green">Core</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ===== AGENT INTEGRATION ===== -->
+    <div class="page" id="page-agent">
+      <div class="page-title">🤖 Agent Integration</div>
+      <div class="page-sub">How to wire the engine into an AI agent in minutes</div>
+
+      <div class="card">
+        <h3>⚡ Minimal Integration</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre>from scripts.agent_hook import AgentPreferenceHook
+
+hook = AgentPreferenceHook()
+
+# Get preferences for context (returns JSON)
+prefs = hook.get_preferences_for_context(["python", "api_design"])
+
+# Use preferences in your agent response...
+
+# Report when user corrects you
+hook.report_correction(
+    task="api_design",
+    context_tags=["python"],
+    agent_proposed="bullets",
+    user_corrected_to="table",
+    user_message="Perfect, tables work better here!"
+)</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>🔌 Middleware — Auto-inject into Prompts</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre>from scripts.agent_hook import AgentPreferenceMiddleware
+
+middleware = AgentPreferenceMiddleware()
+
+# Preferences injected directly into the prompt
+enhanced_prompt = middleware.inject_preferences(
+    base_prompt="Help me design a Python API",
+    context_tags=["python", "fastapi"]
+)
+
+# enhanced_prompt now includes:
+# 🎯 ASSISTANT PREFERENCES (learned from user behavior):
+# PRIMARY: communication.output_format.table
+#   Confidence: 88%
+# RELATED:
+#   • coding.data_structure_clarity (Confidence: 70%)</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>📤 Preference JSON Format (what agents receive)</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre>{
+  "primary_preference": {
+    "id": "comm_table",
+    "path": "communication.output_format.table",
+    "value": "active",
+    "confidence": 0.88,
+    "use_count": 14,
+    "satisfaction_rate": 0.91
+  },
+  "associated_preferences": [
+    {
+      "path": "coding.data_structure_clarity",
+      "confidence": 0.70,
+      "association_strength": 0.80
+    }
+  ],
+  "context_stack": ["base", "project_fastapi"],
+  "loaded_at": "2026-03-28T..."
+}</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>🔁 Quick Convenience Functions</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre># 1-liners for common operations
+from scripts.agent_hook import (
+    get_agent_preferences,
+    report_agent_correction,
+    inject_agent_preferences
+)
+
+# Get prefs
+prefs_json = get_agent_preferences(["python", "api_design"])
+
+# Report correction
+report_agent_correction(
+    task="api_design",
+    context_tags=["python"],
+    agent_proposed="bullets",
+    user_corrected_to="table",
+    user_message="Yes!"
+)
+
+# Inject into prompt
+enhanced = inject_agent_preferences(
+    prompt="Design me an API",
+    context_tags=["python", "fastapi"]
+)</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== CLI ===== -->
+    <div class="page" id="page-cli">
+      <div class="page-title">⌨️ CLI Reference</div>
+      <div class="page-sub">Full command reference for <code>adaptive-cli</code></div>
+
+      <div class="section-title">Create</div>
+      <div class="card">
+        <pre># Create a preference
+adaptive-cli pref create --name bullets --path communication.output_format.bullets --type variant
+
+# Create an association
+adaptive-cli assoc create \
+  --from-id communication.output_format.table \
+  --to-id coding.data_structure_clarity \
+  --strength-forward 0.95 \
+  --strength-backward 0.70
+
+# Create a context
+adaptive-cli context create --name "FastAPI Project" --scope project</pre>
+      </div>
+
+      <div class="section-title">Learn</div>
+      <div class="card">
+        <pre># Record a correction
+adaptive-cli signal correction \
+  --task api_design \
+  --context python fastapi \
+  --proposed communication.output_format.bullets \
+  --corrected communication.output_format.table \
+  --message "Yes, tables are perfect for API endpoints!"
+
+# Record feedback
+adaptive-cli signal feedback \
+  --task code_explanation \
+  --context python \
+  --preferences communication.output_format.bullets communication.depth.detailed \
+  --response "Crystal clear! Exactly the level of detail I needed." \
+  --satisfaction 0.95</pre>
+      </div>
+
+      <div class="section-title">View</div>
+      <div class="card">
+        <pre># List and inspect
+adaptive-cli pref list
+adaptive-cli pref show &lt;id&gt;
+adaptive-cli assoc show &lt;id&gt;
+adaptive-cli context show &lt;id&gt;
+
+# Load preferences for context
+adaptive-cli load --context python api_design
+
+# Generate JSON for agent
+adaptive-cli agent-context --context python fastapi</pre>
+      </div>
+
+      <div class="section-title">Maintain</div>
+      <div class="card">
+        <pre>adaptive-cli recalculate   # Recalculate all strengths
+adaptive-cli decay         # Apply time decay (2%/day)
+adaptive-cli stats         # Show statistics
+adaptive-cli reset         # Reset everything</pre>
+      </div>
+    </div>
+
+    <!-- ===== QUICKSTART ===== -->
+    <div class="page" id="page-quickstart">
+      <div class="page-title">🚀 Quickstart</div>
+      <div class="page-sub">Get up and running in under 5 minutes</div>
+
+      <div class="card">
+        <h3>1. Install</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre>cd adaptive-preference-engine
+chmod +x scripts/cli.py     # optional: make CLI executable</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>2. Run the Demo</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre>python demo.py</pre>
+        </div>
+        <p style="font-size: 13px; color: var(--muted); margin-top: 10px;">Demo shows: creating preferences → associations → contexts → corrections → learned preferences → agent JSON output</p>
+      </div>
+
+      <div class="card">
+        <h3>3. Create Your First Preference</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre>python scripts/cli.py pref create \
+  --name table \
+  --path communication.output_format.table \
+  --type variant</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>4. Record a Correction</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre>python scripts/cli.py signal correction \
+  --task api_design \
+  --context python \
+  --proposed communication.output_format.bullets \
+  --corrected communication.output_format.table \
+  --message "Tables work much better here!"</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>5. Check What the Engine Learned</h3>
+        <div class="code-wrap">
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+          <pre>python scripts/cli.py agent-context --context python api_design</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>📁 Runtime Data Location</h3>
+        <pre>~/.adaptive-cli/
+├── preferences/
+│   ├── all_preferences.jsonl
+│   ├── associations.jsonl
+│   ├── contexts.jsonl
+│   └── signals.jsonl
+└── backups/</pre>
+        <p style="font-size:13px; color: var(--muted); margin-top: 8px;">All data stored as JSONL — human-readable, easily inspectable, no database required.</p>
+      </div>
+    </div>
+
+    <!-- ===== EVALUATIONS ===== -->
+    <div class="page" id="page-evaluations">
+      <div class="page-title">📊 SME Evaluations</div>
+      <div class="page-sub">Two iterations of expert review from 5 domain specialists</div>
+
+      <div class="section-title">Iteration 1 Reviewers</div>
+      <table>
+        <thead>
+          <tr><th>Reviewer</th><th>Domain</th><th>Evaluation File</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Dr. Maya Chen</td><td>ML / Preference Systems</td><td><code>SME_EVALUATION_1_Dr_Maya_Chen.md</code></td></tr>
+          <tr><td>James Rodriguez</td><td>Software Engineering</td><td><code>SME_EVALUATION_2_James_Rodriguez.md</code></td></tr>
+          <tr><td>Priya Sharma</td><td>UX / Human Factors</td><td><code>SME_EVALUATION_3_Priya_Sharma.md</code></td></tr>
+          <tr><td>Dr. Michael Wong</td><td>AI Systems</td><td><code>SME_EVALUATION_4_Dr_Michael_Wong.md</code></td></tr>
+          <tr><td>Lisa Thompson</td><td>Product / Adoption</td><td><code>SME_EVALUATION_5_Lisa_Thompson.md</code></td></tr>
+        </tbody>
+      </table>
+
+      <div class="section-title" style="margin-top: 24px;">Iteration 2 Reviewers</div>
+      <table>
+        <thead>
+          <tr><th>Reviewer</th><th>Domain</th><th>Evaluation File</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Dr. Maya Chen</td><td>ML / Preference Systems</td><td><code>SME_EVALUATION_ITERATION2_01_Dr_Maya_Chen.md</code></td></tr>
+          <tr><td>James Rodriguez</td><td>Software Engineering</td><td><code>SME_EVALUATION_ITERATION2_02_James_Rodriguez.md</code></td></tr>
+          <tr><td>Priya Sharma</td><td>UX / Human Factors</td><td><code>SME_EVALUATION_ITERATION2_03_Priya_Sharma.md</code></td></tr>
+          <tr><td>Dr. Michael Wong</td><td>AI Systems</td><td><code>SME_EVALUATION_ITERATION2_04_Dr_Michael_Wong.md</code></td></tr>
+          <tr><td>Lisa Thompson</td><td>Product / Adoption</td><td><code>SME_EVALUATION_ITERATION2_05_Lisa_Thompson.md</code></td></tr>
+        </tbody>
+      </table>
+
+      <div class="card" style="margin-top: 24px;">
+        <h3>📋 Evaluation Summaries</h3>
+        <p style="font-size: 13px; color: var(--muted);">Full evaluation reports available in:<br>
+        <code>docs/ITERATION1_EVALUATION/SUMMARY.md</code><br>
+        <code>docs/ITERATION2_EVALUATION/SUMMARY.md</code></p>
+      </div>
+    </div>
+
+    <!-- ===== ROADMAP ===== -->
+    <div class="page" id="page-roadmap">
+      <div class="page-title">🗺️ Roadmap</div>
+      <div class="page-sub">Where the engine is and where it's going</div>
+
+      <div class="phase-track">
+        <div class="phase done">
+          <div class="ph-num">Phase 1 ✅</div>
+          <div class="ph-title">Core Engine</div>
+        </div>
+        <div class="phase next">
+          <div class="ph-num">Phase 2 →</div>
+          <div class="ph-title">Intelligence</div>
+        </div>
+        <div class="phase future">
+          <div class="ph-num">Phase 3</div>
+          <div class="ph-title">Platform</div>
+        </div>
+        <div class="phase future">
+          <div class="ph-num">Phase 4</div>
+          <div class="ph-title">Collaboration</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>✅ Phase 1 — Complete</h3>
+        <ul class="checklist">
+          <li class="done"><span class="check">✓</span> Core data models & JSONL storage</li>
+          <li class="done"><span class="check">✓</span> Bidirectional associations + Option C loading</li>
+          <li class="done"><span class="check">✓</span> Context stacking (base/project/conversation)</li>
+          <li class="done"><span class="check">✓</span> Signal processing (corrections + feedback)</li>
+          <li class="done"><span class="check">✓</span> Dynamic strength calculation + time decay</li>
+          <li class="done"><span class="check">✓</span> CLI + agent hooks</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h3>🔜 Phase 2 — Intelligence</h3>
+        <ul class="checklist">
+          <li><span class="x">○</span> Auto-detect new preference categories from behavior</li>
+          <li><span class="x">○</span> Predictive suggestions before you ask</li>
+          <li><span class="x">○</span> Agentic feedback loops (automated reinforcement)</li>
+          <li><span class="x">○</span> ML-based preference predictions</li>
+          <li><span class="x">○</span> Advanced pattern analytics dashboard</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h3>🔮 Phase 3 & 4 — Platform</h3>
+        <ul class="checklist">
+          <li><span class="x">○</span> Web UI / visual dashboard</li>
+          <li><span class="x">○</span> IDE plugins (VSCode, JetBrains)</li>
+          <li><span class="x">○</span> Team / collaborative preferences</li>
+          <li><span class="x">○</span> Cross-tool synchronization</li>
+          <li><span class="x">○</span> Preference export/import</li>
+        </ul>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+function showPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sidebar-item').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  event.currentTarget.classList.add('active');
+}
+
+function copyCode(btn) {
+  const code = btn.nextElementSibling.textContent;
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = '✓ Copied';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+</script>
+</body>
+</html>

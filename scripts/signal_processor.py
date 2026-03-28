@@ -1,0 +1,472 @@
+"""
+signal_processor.py - Process behavioral signals (corrections, feedback) to learn and evolve preferences
+"""
+
+from typing import Dict, List, Optional, Any
+from datetime import datetime, timedelta
+from scripts.models import Signal, Association, AssociationLearning, generate_id
+from scripts.storage import PreferenceStorageManager
+import json
+
+
+class SignalProcessor:
+    """Process behavioral signals to update preferences and associations"""
+    
+    def __init__(self, storage_manager: PreferenceStorageManager):
+        self.storage = storage_manager
+    
+    # Emotional tone detection
+    POSITIVE_INDICATORS = [
+        "perfect", "exactly", "yes", "great", "good", "love", "awesome",
+        "excellent", "brilliant", "ideal", "right", "correct", "thanks"
+    ]
+    
+    NEGATIVE_INDICATORS = [
+        "no", "wrong", "bad", "hate", "awful", "terrible", "frustrating",
+        "incorrect", "useless", "nope", "don't", "didn't"
+    ]
+    
+    def process_correction(self,
+                         task: str,
+                         context_tags: List[str],
+                         agent_proposed: str,
+                         user_corrected_to: str,
+                         user_message: str = "") -> Signal:
+        """
+        Process a correction event where user overrides agent's choice.
+        
+        This is a KEY learning signal - user disagreed with agent's preference.
+        """
+        
+        # Detect emotional tone from message
+        emotional_tone = self._detect_emotional_tone(user_message)
+        emotional_indicators = self._extract_emotional_indicators(user_message)
+        
+        # Create signal record
+        signal = Signal(
+            id=generate_id("sig"),
+            timestamp=datetime.now().isoformat(),
+            type="correction",
+            task=task,
+            context_tags=context_tags,
+            agent_proposed=agent_proposed,
+            user_corrected_to=user_corrected_to,
+            user_response=user_message,
+            emotional_tone=emotional_tone,
+            emotional_indicators=emotional_indicators,
+            preferences_used=[agent_proposed, user_corrected_to]
+        )
+        
+        # STEP 1: Update associations
+        # Decrement the association with old (proposed) preference
+        old_assocs = self.storage.associations.get_associations_for_preference(agent_proposed)
+        for assoc in old_assocs:
+            impact = self._update_association_for_correction(
+                assoc,
+                agent_proposed,
+                is_positive=False,
+                emotional_tone=emotional_tone
+            )
+            signal.associations_affected.append({
+                "assoc_id": assoc.id,
+                "pref_id": agent_proposed,
+                "action": "decrement",
+                "impact": impact
+            })
+        
+        # Increment the association with new (corrected) preference
+        new_assocs = self.storage.associations.get_associations_for_preference(user_corrected_to)
+        for assoc in new_assocs:
+            impact = self._update_association_for_correction(
+                assoc,
+                user_corrected_to,
+                is_positive=True,
+                emotional_tone=emotional_tone
+            )
+            signal.associations_affected.append({
+                "assoc_id": assoc.id,
+                "pref_id": user_corrected_to,
+                "action": "increment",
+                "impact": impact
+            })
+        
+        # STEP 2: Update preference confidences
+        self._update_preference_for_correction(
+            agent_proposed,
+            is_positive=False,
+            adjustment=-0.03
+        )
+        self._update_preference_for_correction(
+            user_corrected_to,
+            is_positive=True,
+            adjustment=+0.03
+        )
+        
+        signal.preferences_affected = [
+            {"pref_id": agent_proposed, "action": "decrement"},
+            {"pref_id": user_corrected_to, "action": "increment"}
+        ]
+        
+        # STEP 3: Save signal
+        self.storage.signals.save_signal(signal)
+        
+        return signal
+    
+    def process_feedback(self,
+                        task: str,
+                        context_tags: List[str],
+                        preferences_used: List[str],
+                        user_response: str,
+                        satisfaction_level: Optional[float] = None) -> Signal:
+        """
+        Process feedback signal (user expresses satisfaction/dissatisfaction).
+        
+        This helps us understand which preferences work well in which contexts.
+        """
+        
+        # Detect emotional tone
+        if satisfaction_level is None:
+            emotional_tone = self._detect_emotional_tone(user_response)
+            satisfaction_level = self._emotion_to_satisfaction(emotional_tone)
+        else:
+            emotional_tone = self._satisfaction_to_emotion(satisfaction_level)
+        
+        emotional_indicators = self._extract_emotional_indicators(user_response)
+        
+        signal = Signal(
+            id=generate_id("sig"),
+            timestamp=datetime.now().isoformat(),
+            type="feedback",
+            task=task,
+            context_tags=context_tags,
+            user_response=user_response,
+            emotional_tone=emotional_tone,
+            emotional_indicators=emotional_indicators,
+            preferences_used=preferences_used
+        )
+        
+        # STEP 1: Boost confidence in used preferences based on satisfaction
+        for pref_id in preferences_used:
+            adjustment = (satisfaction_level - 0.5) * 0.1  # -0.05 to +0.05
+            self._update_preference_for_feedback(pref_id, adjustment)
+            
+            signal.preferences_affected.append({
+                "pref_id": pref_id,
+                "action": "adjust_confidence",
+                "impact": adjustment
+            })
+        
+        # STEP 2: Boost associations between used preferences
+        for i, pref_id in enumerate(preferences_used):
+            assocs = self.storage.associations.get_associations_for_preference(pref_id)
+            for assoc in assocs:
+                # Check if this association involves other used preferences
+                other_used = [p for p in preferences_used if p != pref_id]
+                for other in other_used:
+                    if assoc.from_id == other or assoc.to_id == other:
+                        impact = self._update_association_for_feedback(
+                            assoc,
+                            pref_id,
+                            satisfaction_level
+                        )
+                        signal.associations_affected.append({
+                            "assoc_id": assoc.id,
+                            "prefs": [pref_id, other],
+                            "action": "reinforce",
+                            "impact": impact
+                        })
+        
+        # STEP 3: Save signal
+        self.storage.signals.save_signal(signal)
+        
+        return signal
+    
+    # ---- Helper Methods ----
+    
+    def _detect_emotional_tone(self, text: str) -> str:
+        """Detect emotional tone from user text"""
+        if not text:
+            return "neutral"
+        
+        text_lower = text.lower()
+        
+        positive_count = sum(1 for indicator in self.POSITIVE_INDICATORS 
+                            if indicator in text_lower)
+        negative_count = sum(1 for indicator in self.NEGATIVE_INDICATORS 
+                            if indicator in text_lower)
+        
+        if positive_count > negative_count:
+            return "satisfied"
+        elif negative_count > positive_count:
+            return "frustrated"
+        else:
+            return "neutral"
+    
+    def _extract_emotional_indicators(self, text: str) -> List[str]:
+        """Extract emotional indicator words from text"""
+        if not text:
+            return []
+        
+        text_lower = text.lower()
+        indicators = []
+        
+        for indicator in self.POSITIVE_INDICATORS + self.NEGATIVE_INDICATORS:
+            if indicator in text_lower:
+                indicators.append(indicator)
+        
+        return list(set(indicators))  # Remove duplicates
+    
+    def _emotion_to_satisfaction(self, emotional_tone: str) -> float:
+        """Convert emotional tone to satisfaction score (0.0 to 1.0)"""
+        mapping = {
+            "satisfied": 0.85,
+            "frustrated": 0.20,
+            "neutral": 0.50
+        }
+        return mapping.get(emotional_tone, 0.50)
+    
+    def _satisfaction_to_emotion(self, satisfaction: float) -> str:
+        """Convert satisfaction score to emotional tone"""
+        if satisfaction > 0.7:
+            return "satisfied"
+        elif satisfaction < 0.4:
+            return "frustrated"
+        else:
+            return "neutral"
+    
+    def _update_association_for_correction(self,
+                                          assoc: Association,
+                                          pref_id: str,
+                                          is_positive: bool,
+                                          emotional_tone: str) -> float:
+        """Update association strength for a correction signal"""
+        
+        # Determine direction
+        if assoc.from_id == pref_id:
+            learning = assoc.learning_forward
+            is_forward = True
+        else:
+            learning = assoc.learning_backward
+            is_forward = False
+        
+        # Adjust use count and satisfaction
+        if is_positive:
+            learning.use_count += 1
+            learning.satisfaction_rate = min(learning.satisfaction_rate + 0.05, 1.0)
+            learning.last_used = datetime.now().isoformat()
+        else:
+            learning.use_count = max(learning.use_count - 1, 0)
+            learning.satisfaction_rate = max(learning.satisfaction_rate - 0.05, 0.0)
+        
+        # Recalculate strength
+        new_strength = self._calculate_strength(learning)
+        
+        if is_forward:
+            assoc.strength_forward = new_strength
+            assoc.learning_forward = learning
+        else:
+            assoc.strength_backward = new_strength
+            assoc.learning_backward = learning
+        
+        # Save updated association
+        self.storage.associations.save_association(assoc)
+        
+        return new_strength - (1.0 if is_positive else 0.0)  # Return impact
+    
+    def _update_association_for_feedback(self,
+                                        assoc: Association,
+                                        pref_id: str,
+                                        satisfaction_level: float) -> float:
+        """Update association strength based on feedback signal"""
+        
+        # Determine direction
+        if assoc.from_id == pref_id:
+            learning = assoc.learning_forward
+            is_forward = True
+        else:
+            learning = assoc.learning_backward
+            is_forward = False
+        
+        # Use satisfaction to update
+        learning.satisfaction_rate = (learning.satisfaction_rate * 0.7 + satisfaction_level * 0.3)
+        learning.last_used = datetime.now().isoformat()
+        
+        new_strength = self._calculate_strength(learning)
+        
+        if is_forward:
+            assoc.strength_forward = new_strength
+            assoc.learning_forward = learning
+        else:
+            assoc.strength_backward = new_strength
+            assoc.learning_backward = learning
+        
+        self.storage.associations.save_association(assoc)
+        
+        return new_strength
+    
+    def _update_preference_for_correction(self,
+                                         pref_id: str,
+                                         is_positive: bool,
+                                         adjustment: float) -> None:
+        """Update preference confidence based on correction"""
+        pref = self.storage.preferences.get_preference(pref_id)
+        if not pref:
+            return
+        
+        # Adjust confidence
+        new_confidence = pref.confidence + adjustment
+        new_confidence = max(0.0, min(new_confidence, 1.0))  # Clamp 0-1
+        
+        pref.confidence = new_confidence
+        pref.last_updated = datetime.now().isoformat()
+        
+        # Update learning data
+        if is_positive:
+            pref.learning.use_count += 1
+        
+        self.storage.preferences.save_preference(pref)
+    
+    def _update_preference_for_feedback(self,
+                                       pref_id: str,
+                                       adjustment: float) -> None:
+        """Update preference based on feedback"""
+        pref = self.storage.preferences.get_preference(pref_id)
+        if not pref:
+            return
+        
+        new_confidence = pref.confidence + adjustment
+        new_confidence = max(0.0, min(new_confidence, 1.0))
+        
+        pref.confidence = new_confidence
+        pref.learning.use_count += 1
+        pref.learning.last_used = datetime.now().isoformat()
+        pref.last_updated = datetime.now().isoformat()
+        
+        self.storage.preferences.save_preference(pref)
+    
+    def _calculate_strength(self, learning: AssociationLearning) -> float:
+        """
+        Calculate association strength from learning data.
+        Formula: frequency × trend × emotion × recency
+        """
+        
+        # Frequency (use count)
+        frequency_score = min(learning.use_count / 50, 1.0)  # Saturate at 50
+        
+        # Trend multiplier
+        trend_map = {
+            "strongly_increasing": 1.15,
+            "increasing": 1.05,
+            "stable": 1.0,
+            "decreasing": 0.85,
+            "strongly_decreasing": 0.7
+        }
+        trend_multiplier = trend_map.get(learning.trend, 1.0)
+        
+        # Emotion (satisfaction)
+        emotion_multiplier = 0.5 + (learning.satisfaction_rate * 0.5)  # 0.5 to 1.0
+        
+        # Recency (time decay)
+        days_unused = (datetime.fromisoformat(datetime.now().isoformat()) -
+                       datetime.fromisoformat(learning.last_used)).days
+        recency_multiplier = 0.98 ** days_unused  # 2% decay per day
+        
+        # Combine
+        strength = frequency_score * trend_multiplier * emotion_multiplier * recency_multiplier
+        
+        return min(strength, 1.0)  # Cap at 1.0
+
+
+class StrengthCalculator:
+    """Utility class for recalculating all association strengths"""
+    
+    def __init__(self, storage_manager: PreferenceStorageManager):
+        self.storage = storage_manager
+        self.processor = SignalProcessor(storage_manager)
+    
+    def recalculate_all(self) -> Dict[str, Any]:
+        """Recalculate strengths for all associations"""
+        associations = self.storage.associations.get_all_associations()
+        
+        results = {
+            "total": len(associations),
+            "updated": 0,
+            "details": []
+        }
+        
+        for assoc in associations:
+            # Recalculate both directions
+            old_forward = assoc.strength_forward
+            old_backward = assoc.strength_backward
+            
+            assoc.strength_forward = self.processor._calculate_strength(assoc.learning_forward)
+            assoc.strength_backward = self.processor._calculate_strength(assoc.learning_backward)
+            
+            self.storage.associations.save_association(assoc)
+            
+            results["updated"] += 1
+            results["details"].append({
+                "assoc_id": assoc.id,
+                "forward": {"old": old_forward, "new": assoc.strength_forward},
+                "backward": {"old": old_backward, "new": assoc.strength_backward}
+            })
+        
+        return results
+    
+    def apply_time_decay(self) -> Dict[str, Any]:
+        """Apply time decay to all associations"""
+        associations = self.storage.associations.get_all_associations()
+        
+        results = {
+            "total": len(associations),
+            "decayed": 0,
+            "details": []
+        }
+        
+        for assoc in associations:
+            # Calculate days since last decay
+            last_decay = datetime.fromisoformat(assoc.last_decay_applied)
+            days_since_decay = (datetime.now() - last_decay).days
+            
+            if days_since_decay > 0:
+                # Apply daily decay for each day
+                old_forward = assoc.strength_forward
+                old_backward = assoc.strength_backward
+                
+                decay = assoc.time_decay_factor ** days_since_decay
+                assoc.strength_forward *= decay
+                assoc.strength_backward *= decay
+                assoc.last_decay_applied = datetime.now().isoformat()
+                
+                self.storage.associations.save_association(assoc)
+                
+                results["decayed"] += 1
+                results["details"].append({
+                    "assoc_id": assoc.id,
+                    "days_since_decay": days_since_decay,
+                    "decay_multiplier": decay,
+                    "forward": {"old": old_forward, "new": assoc.strength_forward},
+                    "backward": {"old": old_backward, "new": assoc.strength_backward}
+                })
+        
+        return results
+
+
+if __name__ == "__main__":
+    # Quick test
+    storage = PreferenceStorageManager("/tmp/test_signal")
+    processor = SignalProcessor(storage)
+    
+    # Test emotion detection
+    messages = [
+        "Perfect! That's exactly what I needed!",
+        "No, that's not right at all.",
+        "Yeah, it's okay I guess."
+    ]
+    
+    for msg in messages:
+        tone = processor._detect_emotional_tone(msg)
+        indicators = processor._extract_emotional_indicators(msg)
+        print(f"Message: '{msg}'")
+        print(f"  Tone: {tone}")
+        print(f"  Indicators: {indicators}\n")

@@ -1,0 +1,49 @@
+{
+  "name": "Adaptive Preference Engine",
+  "description": "AI system that learns user coding preferences through implicit feedback. Phase 0-2 complete with 5-expert evaluation system.",
+  "version": "1.0.0",
+  "status": "B- (6.8/10) - Ready for Phase 1",
+  "structure": {
+    "source": "scripts/",
+    "tests": "tests/",
+    "docs": "docs/",
+    "entry": "scripts/cli.py"
+  },
+  "phases": {
+    "phase0": {
+      "status": "✅ COMPLETE",
+      "description": "Critical fixes: user feedback, concurrency control, Bayesian math, control panel",
+      "files": [
+        "scripts/user_feedback_system.py",
+        "scripts/concurrency_control.py",
+        "scripts/bayesian_strength_calculator.py",
+        "scripts/user_control_panel.py"
+      ]
+    },
+    "phase1": {
+      "status": "✅ COMPLETE",
+      "description": "Core learning system built",
+      "files": [
+        "scripts/models.py",
+        "scripts/storage.py",
+        "scripts/signal_processor.py"
+      ]
+    },
+    "phase2": {
+      "status": "✅ COMPLETE",
+      "description": "Intelligence layer (clustering, predictions, trends)",
+      "files": [
+        "scripts/auto_detector.py",
+        "scripts/pattern_analyzer.py",
+        "scripts/suggestion_engine.py"
+      ]
+    }
+  },
+  "evaluation": {
+    "experts": 5,
+    "iteration1": "D+ (4.04/10)",
+    "iteration2": "B- (6.8/10)",
+    "target": "A- (8.3/10)",
+    "docs": "docs/ITERATION2_EVALUATION/"
+  }
+}
