@@ -1,0 +1,9 @@
+{
+  "name": "adaptive-preferences",
+  "version": "1.0.0",
+  "description": "Behavior-driven preference learning — observes corrections and feedback to learn your actual preferences over time.",
+  "author": {
+    "name": "George Louie"
+  },
+  "keywords": ["preferences", "learning", "behavior", "personalization"]
+}
