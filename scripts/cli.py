@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -23,7 +24,7 @@ from scripts.signal_processor import SignalProcessor, StrengthCalculator
 class AdaptivePreferenceCLI:
     """CLI interface for preference engine"""
     
-    def __init__(self, base_dir: str = None):
+    def __init__(self, base_dir: Optional[str] = None):
         if base_dir is None:
             base_dir = Path.home() / ".adaptive-cli"
         
@@ -318,7 +319,7 @@ class AdaptivePreferenceCLI:
     
     def cmd_reset(self, args):
         """Reset all preferences"""
-        self.storage.reset(confirm=True)
+        self.storage.reset()
 
 
 def main():
