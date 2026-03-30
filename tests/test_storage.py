@@ -34,7 +34,7 @@ def make_pref(**kwargs) -> Preference:
         confidence=0.75,
     )
     defaults.update(kwargs)
-    return Preference(**defaults)  # type: ignore[arg-type]
+    return Preference(**defaults)  # type: ignore
 
 
 def make_assoc(**kwargs) -> Association:
@@ -46,7 +46,7 @@ def make_assoc(**kwargs) -> Association:
         strength_backward=0.4,
     )
     defaults.update(kwargs)
-    return Association(**defaults)  # type: ignore[arg-type]
+    return Association(**defaults)  # type: ignore
 
 
 def make_context(**kwargs) -> ContextStack:
@@ -57,7 +57,7 @@ def make_context(**kwargs) -> ContextStack:
         stack_level=0,
     )
     defaults.update(kwargs)
-    return ContextStack(**defaults)  # type: ignore[arg-type]
+    return ContextStack(**defaults)  # type: ignore
 
 
 def make_signal(**kwargs) -> Signal:
@@ -72,7 +72,7 @@ def make_signal(**kwargs) -> Signal:
         user_corrected_to="table",
     )
     defaults.update(kwargs)
-    return Signal(**defaults)  # type: ignore[arg-type]
+    return Signal(**defaults)  # type: ignore
 
 
 # ── Preference tests ──────────────────────────────────────────────────────────
