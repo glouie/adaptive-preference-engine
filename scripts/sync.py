@@ -124,9 +124,11 @@ class SyncRunner:
 
         msg = f"sync: export preferences {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         _git(["commit", "-m", msg], cwd=self.repo)
-        _git(["push"], cwd=self.repo)
-
-        return {"status": "pushed", "counts": counts}
+        try:
+            _git(["push"], cwd=self.repo)
+            return {"status": "pushed", "counts": counts}
+        except RuntimeError as e:
+            return {"status": "committed", "counts": counts, "git_push_error": str(e)}
 
     def pull(self) -> Dict:
         """git pull, then import JSONL → SQLite. Returns result dict."""
@@ -136,9 +138,16 @@ class SyncRunner:
                 "Run: adaptive-cli sync configure --repo-path <path>"
             )
 
-        _git(["pull"], cwd=self.repo)
+        git_pull_error = None
+        try:
+            _git(["pull"], cwd=self.repo)
+        except RuntimeError as e:
+            git_pull_error = str(e)
         counts = PreferenceSync.import_from(self.mgr, self.repo)
-        return {"status": "pulled", "counts": counts}
+        result: Dict = {"status": "pulled", "counts": counts}
+        if git_pull_error:
+            result["git_pull_error"] = git_pull_error
+        return result
 
     def status(self) -> str:
         """Return git status output from the sync repo."""

@@ -349,9 +349,14 @@ class AdaptivePreferenceCLI:
             print("⚠️  Nothing to push — preferences are already up to date.")
         else:
             c = result["counts"]
-            print("✅ Preferences pushed to sync repo.")
+            if result["status"] == "pushed":
+                print("✅ Preferences pushed to sync repo.")
+            else:
+                print("✅ Preferences exported and committed (no remote configured).")
             print(f"   {c['preferences']} preferences, {c['associations']} associations, "
                   f"{c['contexts']} contexts, {c['signals']} signals")
+            if result.get("git_push_error"):
+                print(f"⚠️  git push failed: {result['git_push_error']}")
 
     def cmd_sync_pull(self, args):
         """Pull from git remote and import JSONL → SQLite."""
@@ -363,7 +368,10 @@ class AdaptivePreferenceCLI:
         runner = SyncRunner(self.storage, cfg.sync_repo_path)
         result = runner.pull()
         c = result["counts"]
-        print("✅ Preferences pulled from sync repo.")
+        if result.get("git_pull_error"):
+            print(f"⚠️  git pull failed: {result['git_pull_error']}")
+            print("   Importing from local repo state.")
+        print("✅ Preferences imported from sync repo.")
         print(f"   {c['preferences']} preferences, {c['associations']} associations, "
               f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
 
