@@ -404,8 +404,8 @@ Happy learning! The system will improve with every interaction. 🚀
         print("ADAPTIVE PREFERENCE ENGINE - ONBOARDING TUTORIAL")
         print("=" * 70)
         print("\nPress Enter to advance through each step.")
-        print("Type 'skip' to skip remaining steps.")
-        print("Type 'back' to go to previous step.\n")
+        print("Type 'end' to skip remaining steps.")
+        print("Type 'back' to go to the previous step.\n")
 
         while self.state.get_current_step() < len(self.STEPS):
             step_idx = self.state.get_current_step()
@@ -415,17 +415,33 @@ Happy learning! The system will improve with every interaction. 🚀
             print(f"Duration: {step['duration']}\n")
             print(step["content"])
 
-            # Step 2: Create demo preference or show templates
+            # Step 2: Create demo preference or apply selected template
             if step_idx == 1 and not skip_demo:
                 print("\n" + "─" * 70)
                 self._display_template_options()
-
-                # Create demo preference
                 print("\n" + "─" * 70)
-                print("ACTION: Creating demo preference...")
-                demo_pref_id = self._create_demo_preference()
-                self.state.set_demo_preference(demo_pref_id)
-                print(f"✓ Created: {demo_pref_id}")
+
+                template_manager = PreferenceTemplateManager()
+                templates = template_manager.list_templates()
+                keys = [t['key'] for t in templates]
+
+                choice = input(
+                    f"Choose a profile ({'/'.join(keys)}) or press Enter for the demo: "
+                ).strip().upper()
+
+                if choice in keys:
+                    print(f"\nApplying {choice} template...")
+                    count = template_manager.apply_template(choice, self.storage)
+                    print(f"✓ Applied {choice} template ({count} preferences created)")
+                    # Store first pref as demo pref for state tracking
+                    all_prefs = self.storage.preferences.get_all_preferences()
+                    if all_prefs:
+                        self.state.set_demo_preference(all_prefs[0].id)
+                else:
+                    print("\nACTION: Creating demo preference...")
+                    demo_pref_id = self._create_demo_preference()
+                    self.state.set_demo_preference(demo_pref_id)
+                    print(f"✓ Created: {demo_pref_id}")
 
             # Step 3: Record demo correction
             if step_idx == 2 and not skip_demo:
@@ -451,9 +467,9 @@ Happy learning! The system will improve with every interaction. 🚀
                 self._display_demo_control_panel()
 
             # Wait for user input
-            user_input = input("\n> Press Enter to continue (or 'skip'/'back'): ").strip().lower()
+            user_input = input("\n> Press Enter to continue ('back' = previous step, 'end' = skip to finish): ").strip().lower()
 
-            if user_input == "skip":
+            if user_input == "end":
                 print("\n⏭️  Skipping to end of tutorial...")
                 self.state.state["current_step"] = len(self.STEPS) - 1
                 self.state._save_state()
@@ -463,10 +479,6 @@ Happy learning! The system will improve with every interaction. 🚀
                 print("\n⬅️  Going back to previous step...")
             else:
                 self.state.advance_step()
-
-        # Final step - completion
-        print("\n" + self.STEPS[-1]["content"])
-        input("\n> Press Enter to finish onboarding: ").strip()
 
         self.mark_complete()
         print("\n✅ Onboarding complete! Welcome to the Adaptive Preference Engine!")
@@ -556,18 +568,20 @@ Press 'adaptive-cli pref list' to see live version!
         high_conf = [p for p in prefs if p.confidence >= 0.7]
         emerging = [p for p in prefs if p.confidence < 0.7]
 
-        # ANSI color codes
-        CYAN = "\033[36m"
-        GREEN = "\033[32m"
-        YELLOW = "\033[33m"
-        BOLD = "\033[1m"
-        RESET = "\033[0m"
+        from scripts.cli_utils import CYAN, GREEN, YELLOW, BOLD, RESET, term_width
+
+        w = min(term_width(), 66)
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        box_top    = "╔" + "═" * (w - 2) + "╗"
+        box_title  = f"║{'WEEKLY LEARNING DIGEST':^{w-2}}║"
+        box_date   = f"║{date_str:^{w-2}}║"
+        box_bottom = "╚" + "═" * (w - 2) + "╝"
 
         digest = f"""
-{CYAN}╔════════════════════════════════════════════════════════════════╗
-║              WEEKLY LEARNING DIGEST                             ║
-║              {datetime.now().strftime('%Y-%m-%d')}                                       ║
-╚════════════════════════════════════════════════════════════════╝{RESET}
+{CYAN}{box_top}
+{box_title}
+{box_date}
+{box_bottom}{RESET}
 
 {BOLD}THIS WEEK'S ACTIVITY:{RESET}
   Corrections made: {corrections_this_week}

@@ -62,6 +62,7 @@ class Preference:
     
     @staticmethod
     def from_dict(data):
+        data = dict(data)
         learning_data = LearningData(**data.pop("learning", {}))
         return Preference(**data, learning=learning_data)
 
@@ -121,6 +122,7 @@ class Association:
     
     @staticmethod
     def from_dict(data):
+        data = dict(data)
         learning_forward = AssociationLearning(**data.pop("learning_forward", {}))
         learning_backward = AssociationLearning(**data.pop("learning_backward", {}))
         return Association(**data, learning_forward=learning_forward, learning_backward=learning_backward)

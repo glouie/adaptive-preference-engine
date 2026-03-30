@@ -523,7 +523,7 @@ class SignalProcessor:
         emotion_multiplier = 0.5 + (learning.satisfaction_rate * 0.5)  # 0.5 to 1.0
         
         # Recency (time decay)
-        days_unused = (datetime.fromisoformat(datetime.now().isoformat()) -
+        days_unused = (datetime.now() -
                        datetime.fromisoformat(learning.last_used)).days
         recency_multiplier = 0.98 ** days_unused  # 2% decay per day
         
