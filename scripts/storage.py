@@ -8,6 +8,7 @@ stored as JSON TEXT blobs so callers never deal with join queries.
 
 import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -449,6 +450,7 @@ class PreferenceStorageManager:
 
     def get_storage_info(self) -> Dict[str, Any]:
         return {
+            "base_dir": str(self.base_dir),
             "db_path": str(self.db_path),
             "preferences_count": self._conn.execute(
                 "SELECT COUNT(*) FROM preferences"
