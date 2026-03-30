@@ -63,10 +63,12 @@ class JSONLStorage:
         return found
     
     def _rewrite_all(self, data: List[Dict[str, Any]]) -> None:
-        """Rewrite entire file (used for updates)"""
-        self.filepath.unlink(missing_ok=True)
-        for obj in data:
-            self.append(obj)
+        """Rewrite entire file atomically using a temp file."""
+        tmp_path = self.filepath.with_suffix('.tmp')
+        with open(tmp_path, 'w') as f:
+            for obj in data:
+                f.write(json.dumps(obj) + '\n')
+        os.replace(tmp_path, self.filepath)
     
     def clear(self) -> None:
         """Clear the file"""
