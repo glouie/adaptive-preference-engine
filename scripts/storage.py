@@ -404,7 +404,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    def __init__(self, base_dir: str = None) -> None:
+    def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
             base_dir = os.path.expanduser("~/.adaptive-cli")
         self.base_dir = Path(base_dir)
@@ -432,7 +432,7 @@ class PreferenceStorageManager:
             ).fetchone()[0],
         }
 
-    def backup(self, backup_name: str = None) -> str:
+    def backup(self, backup_name: Optional[str] = None) -> str:
         """Back up the live database using SQLite's online backup API."""
         if backup_name is None:
             backup_name = datetime.now().strftime("%Y%m%d_%H%M%S")
