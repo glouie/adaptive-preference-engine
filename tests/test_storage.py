@@ -2,9 +2,6 @@
 """Tests for SQLite storage layer. Run from project root: pytest tests/test_storage.py -v"""
 
 import sys
-import json
-import tempfile
-import os
 from pathlib import Path
 import pytest
 
@@ -12,8 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.storage import PreferenceStorageManager
 from scripts.models import (
-    Preference, Association, ContextStack, Signal,
-    LearningData, AssociationLearning, generate_id
+    Preference, Association, ContextStack, Signal, generate_id
 )
 
 
