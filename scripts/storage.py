@@ -260,6 +260,17 @@ class PreferenceStorageManager:
         
         return str(backup_dir)
     
+    def prune_old_signals(self, max_age_days: int = 90) -> int:
+        """Remove signals older than max_age_days. Returns number of signals removed."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+        all_signals = self.signals.read_all()
+        kept = [s for s in all_signals if s.get("timestamp", "") >= cutoff]
+        removed = len(all_signals) - len(kept)
+        if removed > 0:
+            self.signals._rewrite_all(kept)
+        return removed
+
     def reset(self) -> None:
         """Reset all preferences (with backup). Caller must confirm before calling."""
         self.backup(f"reset_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
