@@ -260,20 +260,13 @@ class PreferenceStorageManager:
         
         return str(backup_dir)
     
-    def reset(self, confirm: bool = True) -> None:
-        """Reset all preferences (with backup)"""
-        if confirm:
-            response = input("⚠️  Clear all preferences? This will back up old data. (y/n): ")
-            if response.lower() != 'y':
-                return
-        
+    def reset(self) -> None:
+        """Reset all preferences (with backup). Caller must confirm before calling."""
         self.backup(f"reset_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        
         self.preferences.clear()
         self.associations.clear()
         self.contexts.clear()
         self.signals.clear()
-        
         print("✅ Preferences reset. Backup created.")
 
 

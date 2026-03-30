@@ -318,7 +318,11 @@ class AdaptivePreferenceCLI:
     
     def cmd_reset(self, args):
         """Reset all preferences"""
-        self.storage.reset(confirm=True)
+        response = input("⚠️  Clear all preferences? This will back up old data. (y/n): ")
+        if response.lower() != 'y':
+            print("Cancelled.")
+            return
+        self.storage.reset()
 
 
 def main():
