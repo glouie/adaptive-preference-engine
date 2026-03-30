@@ -308,9 +308,9 @@ class AdaptivePreferenceCLI:
     def cmd_show_stats(self, args):
         """Show storage statistics"""
         info = self.storage.get_storage_info()
-        
+
         print(f"\n📊 Storage Statistics")
-        print(f"   Base Dir: {info['base_dir']}")
+        print(f"   DB Path: {info['db_path']}")
         print(f"   Preferences: {info['preferences_count']}")
         print(f"   Associations: {info['associations_count']}")
         print(f"   Contexts: {info['contexts_count']}")

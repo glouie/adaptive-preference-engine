@@ -17,7 +17,8 @@ dev = [
 ]
 
 [project.scripts]
-adaptive-cli = "scripts.cli:main"
+adaptive-cli         = "scripts.cli:main"
+adaptive-cli-migrate = "scripts.migrate_to_sqlite:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
