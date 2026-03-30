@@ -373,10 +373,12 @@ class SignalStorage(SQLiteDB):
         return [self._row_to_signal(r) for r in rows]
 
     def get_signals_for_preference(self, pref_id: str) -> List[Signal]:
-        # preferences_used is a JSON array; use LIKE for a lightweight search
         rows = self._conn.execute(
-            "SELECT * FROM signals WHERE preferences_used LIKE ?",
-            (f'%"{pref_id}"%',),
+            """
+            SELECT s.* FROM signals s, json_each(s.preferences_used) j
+            WHERE j.value = ?
+            """,
+            (pref_id,),
         ).fetchall()
         return [self._row_to_signal(r) for r in rows]
 
@@ -402,16 +404,15 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    def __init__(self, base_dir: str) -> None:
+    def __init__(self, base_dir: str = None) -> None:
+        if base_dir is None:
+            base_dir = os.path.expanduser("~/.adaptive-cli")
         self.base_dir = Path(base_dir)
         db_path = self.base_dir / "preferences" / "adaptive.db"
-        self.preferences = PreferenceStorage(db_path)
-        self.associations = AssociationStorage(self.preferences.db_path)
-        self.contexts = ContextStorage(self.preferences.db_path)
-        self.signals = SignalStorage(self.preferences.db_path)
-        # Share the single connection across all sub-managers
-        for mgr in (self.associations, self.contexts, self.signals):
-            mgr._conn = self.preferences._conn
+        self.preferences  = PreferenceStorage(db_path)
+        self.associations = AssociationStorage(db_path)
+        self.contexts     = ContextStorage(db_path)
+        self.signals      = SignalStorage(db_path)
 
     def get_storage_info(self) -> Dict[str, Any]:
         conn = self.preferences._conn
@@ -431,13 +432,20 @@ class PreferenceStorageManager:
             ).fetchone()[0],
         }
 
-    def backup(self, label: str = "backup") -> str:
-        """Copy the database file to <base_dir>/backups/<label>.db."""
-        backup_dir = self.base_dir / "backups"
+    def backup(self, backup_name: str = None) -> str:
+        """Back up the live database using SQLite's online backup API."""
+        if backup_name is None:
+            backup_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = self.base_dir / "backups" / backup_name
         backup_dir.mkdir(parents=True, exist_ok=True)
-        dest = backup_dir / f"{label}.db"
-        shutil.copy2(str(self.preferences.db_path), str(dest))
-        return str(dest)
+        backup_path = backup_dir / "adaptive.db"
+        src_conn = self.preferences._conn
+        dst_conn = sqlite3.connect(str(backup_path))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+        return str(backup_dir)
 
     def prune_old_signals(self, max_age_days: int = 90) -> int:
         """Delete signals older than *max_age_days*. Returns count removed."""
