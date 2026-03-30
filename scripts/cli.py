@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 # Add scripts to path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.models import (
     Preference, Association, AssociationLearning, ContextStack,
@@ -26,7 +26,7 @@ class AdaptivePreferenceCLI:
     
     def __init__(self, base_dir: Optional[str] = None):
         if base_dir is None:
-            base_dir = Path.home() / ".adaptive-cli"
+            base_dir = str(Path.home() / ".adaptive-cli")
         
         self.storage = PreferenceStorageManager(str(base_dir))
         self.loader = PreferenceLoader(self.storage)
