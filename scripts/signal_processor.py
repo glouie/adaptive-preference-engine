@@ -4,9 +4,119 @@ signal_processor.py - Process behavioral signals (corrections, feedback) to lear
 
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
+from pathlib import Path
 from scripts.models import Signal, Association, AssociationLearning, generate_id
 from scripts.storage import PreferenceStorageManager
+from scripts.habit_tracker import HabitTracker
 import json
+import logging
+import os
+
+
+class FrictionMetrics:
+    """Tracks attempt-to-success ratios for friction analysis"""
+
+    def __init__(self, metrics_file: Path = None):
+        """
+        Initialize friction metrics tracker.
+
+        Args:
+            metrics_file: Path to JSONL metrics file. Defaults to ~/.adaptive-cli/metrics.jsonl
+        """
+        if metrics_file is None:
+            base_dir = Path(os.path.expanduser("~/.adaptive-cli"))
+            base_dir.mkdir(parents=True, exist_ok=True)
+            metrics_file = base_dir / "metrics.jsonl"
+
+        self.metrics_file = Path(metrics_file)
+
+    def record_attempt(self, operation: str, success: bool, duration_ms: float = 0):
+        """
+        Record an attempt for an operation.
+
+        Args:
+            operation: Name of the operation (e.g., "correction", "feedback")
+            success: Whether the operation succeeded
+            duration_ms: Duration in milliseconds
+        """
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "operation": operation,
+            "success": success,
+            "duration_ms": duration_ms
+        }
+
+        # Append to JSONL file
+        with open(self.metrics_file, 'a') as f:
+            f.write(json.dumps(record) + '\n')
+
+    def get_success_rate(self, operation: str) -> float:
+        """
+        Get success rate for an operation.
+
+        Args:
+            operation: Name of the operation
+
+        Returns:
+            Success rate (0.0 to 1.0), or 0.0 if no records exist
+        """
+        if not self.metrics_file.exists():
+            return 0.0
+
+        attempts = 0
+        successes = 0
+
+        with open(self.metrics_file, 'r') as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        record = json.loads(line)
+                        if record.get("operation") == operation:
+                            attempts += 1
+                            if record.get("success"):
+                                successes += 1
+                    except json.JSONDecodeError:
+                        continue
+
+        if attempts == 0:
+            return 0.0
+
+        return successes / attempts
+
+    def get_summary(self) -> dict:
+        """
+        Get summary of all operations.
+
+        Returns:
+            Dict mapping operation names to {attempts, successes, success_rate}
+        """
+        if not self.metrics_file.exists():
+            return {}
+
+        operations = {}
+
+        with open(self.metrics_file, 'r') as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        record = json.loads(line)
+                        op = record.get("operation")
+                        if op not in operations:
+                            operations[op] = {"attempts": 0, "successes": 0}
+
+                        operations[op]["attempts"] += 1
+                        if record.get("success"):
+                            operations[op]["successes"] += 1
+                    except json.JSONDecodeError:
+                        continue
+
+        # Calculate success rates
+        for op in operations:
+            attempts = operations[op]["attempts"]
+            successes = operations[op]["successes"]
+            operations[op]["success_rate"] = successes / attempts if attempts > 0 else 0.0
+
+        return operations
 
 
 class SignalProcessor:
@@ -34,83 +144,106 @@ class SignalProcessor:
                          user_message: str = "") -> Signal:
         """
         Process a correction event where user overrides agent's choice.
-        
+
         This is a KEY learning signal - user disagreed with agent's preference.
         """
-        
-        # Detect emotional tone from message
-        emotional_tone = self._detect_emotional_tone(user_message)
-        emotional_indicators = self._extract_emotional_indicators(user_message)
-        
-        # Create signal record
-        signal = Signal(
-            id=generate_id("sig"),
-            timestamp=datetime.now().isoformat(),
-            type="correction",
-            task=task,
-            context_tags=context_tags,
-            agent_proposed=agent_proposed,
-            user_corrected_to=user_corrected_to,
-            user_response=user_message,
-            emotional_tone=emotional_tone,
-            emotional_indicators=emotional_indicators,
-            preferences_used=[agent_proposed, user_corrected_to]
-        )
-        
-        # STEP 1: Update associations
-        # Decrement the association with old (proposed) preference
-        old_assocs = self.storage.associations.get_associations_for_preference(agent_proposed)
-        for assoc in old_assocs:
-            impact = self._update_association_for_correction(
-                assoc,
+        # Track metrics
+        metrics = FrictionMetrics()
+        start_time = datetime.now()
+        success = False
+
+        try:
+            # Detect emotional tone from message
+            emotional_tone = self._detect_emotional_tone(user_message)
+            emotional_indicators = self._extract_emotional_indicators(user_message)
+
+            # Create signal record
+            signal = Signal(
+                id=generate_id("sig"),
+                timestamp=datetime.now().isoformat(),
+                type="correction",
+                task=task,
+                context_tags=context_tags,
+                agent_proposed=agent_proposed,
+                user_corrected_to=user_corrected_to,
+                user_response=user_message,
+                emotional_tone=emotional_tone,
+                emotional_indicators=emotional_indicators,
+                preferences_used=[agent_proposed, user_corrected_to]
+            )
+
+            # STEP 1: Update associations
+            # Decrement the association with old (proposed) preference
+            old_assocs = self.storage.associations.get_associations_for_preference(agent_proposed)
+            for assoc in old_assocs:
+                impact = self._update_association_for_correction(
+                    assoc,
+                    agent_proposed,
+                    is_positive=False,
+                    emotional_tone=emotional_tone
+                )
+                signal.associations_affected.append({
+                    "assoc_id": assoc.id,
+                    "pref_id": agent_proposed,
+                    "action": "decrement",
+                    "impact": impact
+                })
+
+            # Increment the association with new (corrected) preference
+            new_assocs = self.storage.associations.get_associations_for_preference(user_corrected_to)
+            for assoc in new_assocs:
+                impact = self._update_association_for_correction(
+                    assoc,
+                    user_corrected_to,
+                    is_positive=True,
+                    emotional_tone=emotional_tone
+                )
+                signal.associations_affected.append({
+                    "assoc_id": assoc.id,
+                    "pref_id": user_corrected_to,
+                    "action": "increment",
+                    "impact": impact
+                })
+
+            # STEP 2: Update preference confidences
+            self._update_preference_for_correction(
                 agent_proposed,
                 is_positive=False,
-                emotional_tone=emotional_tone
+                adjustment=-0.03
             )
-            signal.associations_affected.append({
-                "assoc_id": assoc.id,
-                "pref_id": agent_proposed,
-                "action": "decrement",
-                "impact": impact
-            })
-        
-        # Increment the association with new (corrected) preference
-        new_assocs = self.storage.associations.get_associations_for_preference(user_corrected_to)
-        for assoc in new_assocs:
-            impact = self._update_association_for_correction(
-                assoc,
+            self._update_preference_for_correction(
                 user_corrected_to,
                 is_positive=True,
-                emotional_tone=emotional_tone
+                adjustment=+0.03
             )
-            signal.associations_affected.append({
-                "assoc_id": assoc.id,
-                "pref_id": user_corrected_to,
-                "action": "increment",
-                "impact": impact
-            })
-        
-        # STEP 2: Update preference confidences
-        self._update_preference_for_correction(
-            agent_proposed,
-            is_positive=False,
-            adjustment=-0.03
-        )
-        self._update_preference_for_correction(
-            user_corrected_to,
-            is_positive=True,
-            adjustment=+0.03
-        )
-        
-        signal.preferences_affected = [
-            {"pref_id": agent_proposed, "action": "decrement"},
-            {"pref_id": user_corrected_to, "action": "increment"}
-        ]
-        
-        # STEP 3: Save signal
-        self.storage.signals.save_signal(signal)
-        
-        return signal
+
+            signal.preferences_affected = [
+                {"pref_id": agent_proposed, "action": "decrement"},
+                {"pref_id": user_corrected_to, "action": "increment"}
+            ]
+
+            # STEP 3: Save signal
+            self.storage.signals.save_signal(signal)
+
+            # STEP 4: Record habit usage (with error handling)
+            try:
+                context = context_tags[0] if context_tags else "general"
+                tracker = HabitTracker()
+                tracker.record_usage(context)
+            except Exception as e:
+                logging.warning(f"Signal processing failed during habit tracking: {e}")
+
+            success = True
+            return signal
+
+        except Exception as e:
+            logging.warning(f"Signal processing failed: {e}")
+            raise
+
+        finally:
+            # Record attempt metrics
+            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+            metrics.record_attempt("correction", success, duration_ms)
     
     def process_feedback(self,
                         task: str,
@@ -120,66 +253,89 @@ class SignalProcessor:
                         satisfaction_level: Optional[float] = None) -> Signal:
         """
         Process feedback signal (user expresses satisfaction/dissatisfaction).
-        
+
         This helps us understand which preferences work well in which contexts.
         """
-        
-        # Detect emotional tone
-        if satisfaction_level is None:
-            emotional_tone = self._detect_emotional_tone(user_response)
-            satisfaction_level = self._emotion_to_satisfaction(emotional_tone)
-        else:
-            emotional_tone = self._satisfaction_to_emotion(satisfaction_level)
-        
-        emotional_indicators = self._extract_emotional_indicators(user_response)
-        
-        signal = Signal(
-            id=generate_id("sig"),
-            timestamp=datetime.now().isoformat(),
-            type="feedback",
-            task=task,
-            context_tags=context_tags,
-            user_response=user_response,
-            emotional_tone=emotional_tone,
-            emotional_indicators=emotional_indicators,
-            preferences_used=preferences_used
-        )
-        
-        # STEP 1: Boost confidence in used preferences based on satisfaction
-        for pref_id in preferences_used:
-            adjustment = (satisfaction_level - 0.5) * 0.1  # -0.05 to +0.05
-            self._update_preference_for_feedback(pref_id, adjustment)
-            
-            signal.preferences_affected.append({
-                "pref_id": pref_id,
-                "action": "adjust_confidence",
-                "impact": adjustment
-            })
-        
-        # STEP 2: Boost associations between used preferences
-        for i, pref_id in enumerate(preferences_used):
-            assocs = self.storage.associations.get_associations_for_preference(pref_id)
-            for assoc in assocs:
-                # Check if this association involves other used preferences
-                other_used = [p for p in preferences_used if p != pref_id]
-                for other in other_used:
-                    if assoc.from_id == other or assoc.to_id == other:
-                        impact = self._update_association_for_feedback(
-                            assoc,
-                            pref_id,
-                            satisfaction_level
-                        )
-                        signal.associations_affected.append({
-                            "assoc_id": assoc.id,
-                            "prefs": [pref_id, other],
-                            "action": "reinforce",
-                            "impact": impact
-                        })
-        
-        # STEP 3: Save signal
-        self.storage.signals.save_signal(signal)
-        
-        return signal
+        # Track metrics
+        metrics = FrictionMetrics()
+        start_time = datetime.now()
+        success = False
+
+        try:
+            # Detect emotional tone
+            if satisfaction_level is None:
+                emotional_tone = self._detect_emotional_tone(user_response)
+                satisfaction_level = self._emotion_to_satisfaction(emotional_tone)
+            else:
+                emotional_tone = self._satisfaction_to_emotion(satisfaction_level)
+
+            emotional_indicators = self._extract_emotional_indicators(user_response)
+
+            signal = Signal(
+                id=generate_id("sig"),
+                timestamp=datetime.now().isoformat(),
+                type="feedback",
+                task=task,
+                context_tags=context_tags,
+                user_response=user_response,
+                emotional_tone=emotional_tone,
+                emotional_indicators=emotional_indicators,
+                preferences_used=preferences_used
+            )
+
+            # STEP 1: Boost confidence in used preferences based on satisfaction
+            for pref_id in preferences_used:
+                adjustment = (satisfaction_level - 0.5) * 0.1  # -0.05 to +0.05
+                self._update_preference_for_feedback(pref_id, adjustment)
+
+                signal.preferences_affected.append({
+                    "pref_id": pref_id,
+                    "action": "adjust_confidence",
+                    "impact": adjustment
+                })
+
+            # STEP 2: Boost associations between used preferences
+            for i, pref_id in enumerate(preferences_used):
+                assocs = self.storage.associations.get_associations_for_preference(pref_id)
+                for assoc in assocs:
+                    # Check if this association involves other used preferences
+                    other_used = [p for p in preferences_used if p != pref_id]
+                    for other in other_used:
+                        if assoc.from_id == other or assoc.to_id == other:
+                            impact = self._update_association_for_feedback(
+                                assoc,
+                                pref_id,
+                                satisfaction_level
+                            )
+                            signal.associations_affected.append({
+                                "assoc_id": assoc.id,
+                                "prefs": [pref_id, other],
+                                "action": "reinforce",
+                                "impact": impact
+                            })
+
+            # STEP 3: Save signal
+            self.storage.signals.save_signal(signal)
+
+            # STEP 4: Record habit usage (with error handling)
+            try:
+                context = context_tags[0] if context_tags else "general"
+                tracker = HabitTracker()
+                tracker.record_usage(context)
+            except Exception as e:
+                logging.warning(f"Signal processing failed during habit tracking: {e}")
+
+            success = True
+            return signal
+
+        except Exception as e:
+            logging.warning(f"Signal processing failed: {e}")
+            raise
+
+        finally:
+            # Record attempt metrics
+            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+            metrics.record_attempt("feedback", success, duration_ms)
     
     # ---- Helper Methods ----
     

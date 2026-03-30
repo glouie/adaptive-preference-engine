@@ -7,9 +7,10 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from datetime import datetime
 
-# Add scripts to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root to path so `scripts` package is importable
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.models import (
     Preference, Association, AssociationLearning, ContextStack,
@@ -18,6 +19,8 @@ from scripts.models import (
 from scripts.storage import PreferenceStorageManager
 from scripts.preference_loader import PreferenceLoader
 from scripts.signal_processor import SignalProcessor, StrengthCalculator
+from scripts.significance_consolidation_bridge import get_integrated_engine
+from scripts.onboarding import OnboardingSystem, check_first_run_and_onboard
 
 
 class AdaptivePreferenceCLI:
@@ -26,11 +29,12 @@ class AdaptivePreferenceCLI:
     def __init__(self, base_dir: str = None):
         if base_dir is None:
             base_dir = Path.home() / ".adaptive-cli"
-        
+
         self.storage = PreferenceStorageManager(str(base_dir))
         self.loader = PreferenceLoader(self.storage)
         self.processor = SignalProcessor(self.storage)
         self.strength_calc = StrengthCalculator(self.storage)
+        self.consolidation = get_integrated_engine(str(base_dir))
     
     # ---- Preference Management ----
     
@@ -316,9 +320,72 @@ class AdaptivePreferenceCLI:
         print(f"   Contexts: {info['contexts_count']}")
         print(f"   Signals: {info['signals_count']}")
     
+    # ---- Consolidation ----
+
+    def cmd_consolidate_daily(self, args):
+        """Run daily consolidation cycle"""
+        result = self.consolidation.run_daily_consolidation()
+
+        print(f"\n🧠 Daily Consolidation Complete")
+        print("─" * 80)
+        print(result["consolidation_details"])
+
+        if result["preferences_promoted"]:
+            print(f"\n✨ Promoted Preferences ({len(result['preferences_promoted'])}):")
+            for pref_id in result["preferences_promoted"]:
+                pref = self.storage.preferences.get_preference(pref_id)
+                if pref:
+                    change = result["stage_changes"].get(pref_id, {})
+                    new_conf = result["confidence_updates"].get(pref_id, pref.confidence)
+                    print(
+                        f"   {pref.path:40s} "
+                        f"{change.get('from', '?'):12s} → {change.get('to', '?'):12s} "
+                        f"(confidence: {new_conf:.0%})"
+                    )
+
+        if result["preferences_demoted"]:
+            print(f"\n⚠️  Demoted Preferences ({len(result['preferences_demoted'])}):")
+            for pref_id in result["preferences_demoted"]:
+                pref = self.storage.preferences.get_preference(pref_id)
+                if pref:
+                    new_conf = result["confidence_updates"].get(pref_id, pref.confidence)
+                    print(f"   {pref.path:40s} (confidence: {new_conf:.0%})")
+
+    def cmd_consolidation_report(self, args):
+        """Show consolidation report"""
+        report = self.consolidation.get_consolidation_report()
+        print(report)
+
     def cmd_reset(self, args):
         """Reset all preferences"""
         self.storage.reset(confirm=True)
+
+    # ---- Onboarding ----
+
+    def cmd_onboard(self, args):
+        """Run onboarding tutorial"""
+        onboarding = OnboardingSystem(str(self.storage.base_dir))
+
+        if args.reset:
+            # Reset onboarding marker to restart tutorial
+            complete_file = Path(self.storage.base_dir) / "onboarding_complete"
+            if complete_file.exists():
+                complete_file.unlink()
+            print("✓ Onboarding reset. Tutorial will run on next command.")
+        else:
+            # Run tutorial
+            if not onboarding.is_first_run():
+                print("✓ You've already completed onboarding!")
+                print("  Run 'adaptive-cli onboard --reset' to restart the tutorial.")
+                return
+
+            onboarding.run_tutorial(skip_demo=False)
+
+    def cmd_digest_weekly(self, args):
+        """Show weekly learning digest"""
+        onboarding = OnboardingSystem(str(self.storage.base_dir))
+        digest = onboarding.generate_weekly_digest()
+        print(digest)
 
 
 def main():
@@ -327,6 +394,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Run onboarding tutorial (first time only)
+  adaptive-cli onboard
+
+  # View weekly learning summary
+  adaptive-cli digest weekly
+
   # Create a preference
   adaptive-cli pref create --name bullets --path communication.output_format.bullets \\
     --type variant --parent comm_format
@@ -438,13 +511,33 @@ Examples:
     
     decay_parser = subparsers.add_parser("decay", help="Apply time decay")
     decay_parser.add_argument("--details", action="store_true")
-    
+
+    consolidate_parser = subparsers.add_parser("consolidate", help="Run consolidation cycle")
+    consolidate_sub = consolidate_parser.add_subparsers(dest="subcommand")
+
+    daily_consol = consolidate_sub.add_parser("daily", help="Run daily consolidation")
+
+    report_consol = consolidate_sub.add_parser("report", help="Show consolidation report")
+
     reset_parser = subparsers.add_parser("reset", help="Reset all preferences")
+
+    # Onboarding commands
+    onboard_parser = subparsers.add_parser("onboard", help="Run onboarding tutorial")
+    onboard_parser.add_argument("--reset", action="store_true", help="Reset onboarding to restart tutorial")
+
+    digest_parser = subparsers.add_parser("digest", help="Show learning digest")
+    digest_sub = digest_parser.add_subparsers(dest="subcommand")
+    weekly_digest = digest_sub.add_parser("weekly", help="Show weekly learning digest")
     
     args = parser.parse_args()
-    
+
+    # Check for first-run and trigger onboarding if needed
+    # Only skip if explicitly requested via --skip-onboarding flag or if running onboard command
+    skip_onboarding = getattr(args, 'skip_onboarding', False) or args.command == "onboard"
+    check_first_run_and_onboard(skip_onboarding=skip_onboarding)
+
     cli = AdaptivePreferenceCLI()
-    
+
     # Route commands
     try:
         if args.command == "pref":
@@ -489,10 +582,27 @@ Examples:
         
         elif args.command == "decay":
             cli.cmd_apply_decay(args)
-        
+
+        elif args.command == "consolidate":
+            if args.subcommand == "daily":
+                cli.cmd_consolidate_daily(args)
+            elif args.subcommand == "report":
+                cli.cmd_consolidation_report(args)
+            else:
+                consolidate_parser.print_help()
+
         elif args.command == "reset":
             cli.cmd_reset(args)
-        
+
+        elif args.command == "onboard":
+            cli.cmd_onboard(args)
+
+        elif args.command == "digest":
+            if args.subcommand == "weekly":
+                cli.cmd_digest_weekly(args)
+            else:
+                digest_parser.print_help()
+
         else:
             parser.print_help()
     

@@ -4,10 +4,15 @@ storage.py - JSONL file storage and retrieval for preferences, associations, sig
 
 import json
 import os
+import logging
+import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 from scripts.models import Preference, Association, ContextStack, Signal
+from scripts.distributed_lock import DistributedLock
+
+logger = logging.getLogger(__name__)
 
 
 class JSONLStorage:
@@ -218,22 +223,331 @@ class SignalStorage(JSONLStorage):
 
 class PreferenceStorageManager:
     """High-level manager for all preference storage"""
-    
-    def __init__(self, base_dir: str = None):
-        """Initialize storage manager"""
+
+    def __init__(
+        self,
+        base_dir: str = None,
+        use_locking: bool = True,
+        auto_compact_threshold: int = 10000,
+        write_timeout: Optional[float] = 30.0,
+        read_timeout: Optional[float] = 10.0
+    ):
+        """
+        Initialize storage manager.
+
+        Args:
+            base_dir: Base directory for preference storage (~/.adaptive-cli if None)
+            use_locking: Whether to use distributed locking for write operations (default: True)
+            auto_compact_threshold: Number of lines in a JSONL file that triggers auto-compaction (default: 10000)
+            write_timeout: Timeout in seconds for write operations (default: 30.0, None to disable)
+            read_timeout: Timeout in seconds for read operations (default: 10.0, None to disable)
+        """
         if base_dir is None:
             base_dir = os.path.expanduser("~/.adaptive-cli")
-        
+
         self.base_dir = Path(base_dir)
         self.preferences_dir = self.base_dir / "preferences"
         self.preferences_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Initialize storage for different file types
         self.preferences = PreferenceStorage(str(self.preferences_dir / "all_preferences.jsonl"))
         self.associations = AssociationStorage(str(self.preferences_dir / "associations.jsonl"))
         self.contexts = ContextStorage(str(self.preferences_dir / "contexts.jsonl"))
         self.signals = SignalStorage(str(self.preferences_dir / "signals.jsonl"))
-    
+
+        # Initialize distributed lock system
+        self.use_locking = use_locking
+        self.distributed_lock = DistributedLock(str(self.base_dir)) if use_locking else None
+
+        # Timeout settings for operations
+        self.write_timeout = write_timeout
+        self.read_timeout = read_timeout
+
+        # Auto-compaction: check if compaction is needed and run if threshold exceeded
+        if self.should_compact(auto_compact_threshold):
+            logger.info(f"Auto-compaction triggered (threshold: {auto_compact_threshold})")
+            self.compact_all()
+
+    # ---- Auto-compaction helper methods ----
+
+    def _record_count(self, jsonl_file: Path) -> int:
+        """
+        Efficiently count the number of records in a JSONL file.
+
+        Counts non-empty lines without parsing JSON.
+
+        Args:
+            jsonl_file: Path to the JSONL file
+
+        Returns:
+            Number of non-empty lines in the file (0 if file doesn't exist)
+        """
+        if not jsonl_file.exists():
+            return 0
+
+        try:
+            count = 0
+            with open(jsonl_file, 'r') as f:
+                for line in f:
+                    if line.strip():
+                        count += 1
+            return count
+        except Exception as e:
+            logger.warning(f"Error counting records in {jsonl_file}: {e}")
+            return 0
+
+    def should_compact(self, threshold: int = 10000) -> bool:
+        """
+        Check if any JSONL file exceeds the compaction threshold.
+
+        Args:
+            threshold: Line count threshold for triggering compaction (default: 10000)
+
+        Returns:
+            True if any JSONL file has more than threshold lines, False otherwise
+        """
+        storage_files = [
+            self.preferences.filepath,
+            self.associations.filepath,
+            self.contexts.filepath,
+            self.signals.filepath
+        ]
+
+        for jsonl_file in storage_files:
+            if self._record_count(jsonl_file) > threshold:
+                logger.debug(f"Compaction needed: {jsonl_file.name} exceeds {threshold} lines")
+                return True
+
+        return False
+
+    # ---- Wrapped write methods with optional locking ----
+
+    def save_preference(self, preference: Preference) -> bool:
+        """
+        Save preference with optional distributed locking and timeout.
+
+        Args:
+            preference: Preference object to save
+
+        Returns:
+            True if save was successful, False if timeout occurred
+        """
+        def do_write():
+            if self.use_locking:
+                lock_name = "preferences_write"
+                if not self.distributed_lock.acquire(lock_name, timeout_seconds=5.0):
+                    raise RuntimeError(f"Could not acquire lock for {lock_name}")
+                try:
+                    self.preferences.save_preference(preference)
+                finally:
+                    self.distributed_lock.release(lock_name)
+            else:
+                self.preferences.save_preference(preference)
+
+        if self.write_timeout is None:
+            do_write()
+            return True
+
+        result = [False]
+        exception = [None]
+
+        def write_with_result():
+            try:
+                do_write()
+                result[0] = True
+            except Exception as e:
+                exception[0] = e
+
+        t = threading.Thread(target=write_with_result, daemon=False)
+        t.start()
+        t.join(timeout=self.write_timeout)
+
+        if t.is_alive():
+            logger.warning(
+                f"Write timeout after {self.write_timeout}s for save_preference"
+            )
+            return False
+
+        if exception[0]:
+            raise exception[0]
+
+        return result[0]
+
+    def delete_preference(self, pref_id: str) -> None:
+        """
+        Delete preference with optional distributed locking.
+
+        Args:
+            pref_id: ID of preference to delete
+        """
+        if self.use_locking:
+            lock_name = "preferences_write"
+            if not self.distributed_lock.acquire(lock_name, timeout_seconds=5.0):
+                raise RuntimeError(f"Could not acquire lock for {lock_name}")
+            try:
+                data = self.preferences.read_all()
+                filtered = [obj for obj in data if obj.get("id") != pref_id]
+                self.preferences._rewrite_all(filtered)
+            finally:
+                self.distributed_lock.release(lock_name)
+        else:
+            data = self.preferences.read_all()
+            filtered = [obj for obj in data if obj.get("id") != pref_id]
+            self.preferences._rewrite_all(filtered)
+
+    def save_association(self, association: Association) -> bool:
+        """
+        Save association with optional distributed locking and timeout.
+
+        Args:
+            association: Association object to save
+
+        Returns:
+            True if save was successful, False if timeout occurred
+        """
+        def do_write():
+            if self.use_locking:
+                lock_name = "associations_write"
+                if not self.distributed_lock.acquire(lock_name, timeout_seconds=5.0):
+                    raise RuntimeError(f"Could not acquire lock for {lock_name}")
+                try:
+                    self.associations.save_association(association)
+                finally:
+                    self.distributed_lock.release(lock_name)
+            else:
+                self.associations.save_association(association)
+
+        if self.write_timeout is None:
+            do_write()
+            return True
+
+        result = [False]
+        exception = [None]
+
+        def write_with_result():
+            try:
+                do_write()
+                result[0] = True
+            except Exception as e:
+                exception[0] = e
+
+        t = threading.Thread(target=write_with_result, daemon=False)
+        t.start()
+        t.join(timeout=self.write_timeout)
+
+        if t.is_alive():
+            logger.warning(
+                f"Write timeout after {self.write_timeout}s for save_association"
+            )
+            return False
+
+        if exception[0]:
+            raise exception[0]
+
+        return result[0]
+
+    def save_context(self, context: ContextStack) -> bool:
+        """
+        Save context with optional distributed locking and timeout.
+
+        Args:
+            context: ContextStack object to save
+
+        Returns:
+            True if save was successful, False if timeout occurred
+        """
+        def do_write():
+            if self.use_locking:
+                lock_name = "contexts_write"
+                if not self.distributed_lock.acquire(lock_name, timeout_seconds=5.0):
+                    raise RuntimeError(f"Could not acquire lock for {lock_name}")
+                try:
+                    self.contexts.save_context(context)
+                finally:
+                    self.distributed_lock.release(lock_name)
+            else:
+                self.contexts.save_context(context)
+
+        if self.write_timeout is None:
+            do_write()
+            return True
+
+        result = [False]
+        exception = [None]
+
+        def write_with_result():
+            try:
+                do_write()
+                result[0] = True
+            except Exception as e:
+                exception[0] = e
+
+        t = threading.Thread(target=write_with_result, daemon=False)
+        t.start()
+        t.join(timeout=self.write_timeout)
+
+        if t.is_alive():
+            logger.warning(
+                f"Write timeout after {self.write_timeout}s for save_context"
+            )
+            return False
+
+        if exception[0]:
+            raise exception[0]
+
+        return result[0]
+
+    def save_signal(self, signal: Signal) -> bool:
+        """
+        Save signal with optional distributed locking and timeout.
+
+        Args:
+            signal: Signal object to save
+
+        Returns:
+            True if save was successful, False if timeout occurred
+        """
+        def do_write():
+            if self.use_locking:
+                lock_name = "signals_write"
+                if not self.distributed_lock.acquire(lock_name, timeout_seconds=5.0):
+                    raise RuntimeError(f"Could not acquire lock for {lock_name}")
+                try:
+                    self.signals.save_signal(signal)
+                finally:
+                    self.distributed_lock.release(lock_name)
+            else:
+                self.signals.save_signal(signal)
+
+        if self.write_timeout is None:
+            do_write()
+            return True
+
+        result = [False]
+        exception = [None]
+
+        def write_with_result():
+            try:
+                do_write()
+                result[0] = True
+            except Exception as e:
+                exception[0] = e
+
+        t = threading.Thread(target=write_with_result, daemon=False)
+        t.start()
+        t.join(timeout=self.write_timeout)
+
+        if t.is_alive():
+            logger.warning(
+                f"Write timeout after {self.write_timeout}s for save_signal"
+            )
+            return False
+
+        if exception[0]:
+            raise exception[0]
+
+        return result[0]
+
     def get_storage_info(self) -> Dict[str, Any]:
         """Get storage statistics"""
         return {
@@ -245,34 +559,216 @@ class PreferenceStorageManager:
         }
     
     def backup(self, backup_name: str = None) -> str:
-        """Create timestamped backup of all preference files"""
+        """
+        Create timestamped backup of all preference files (with optional locking).
+
+        Args:
+            backup_name: Name for the backup (defaults to timestamp)
+
+        Returns:
+            Path to the backup directory
+        """
+        backup_fn = self._do_backup
+
+        if self.use_locking:
+            lock_name = "storage_backup"
+            if not self.distributed_lock.acquire(lock_name, timeout_seconds=5.0):
+                raise RuntimeError(f"Could not acquire lock for {lock_name}")
+            try:
+                return backup_fn(backup_name)
+            finally:
+                self.distributed_lock.release(lock_name)
+        else:
+            return backup_fn(backup_name)
+
+    def _do_backup(self, backup_name: str = None) -> str:
+        """Internal backup implementation."""
         if backup_name is None:
             backup_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         backup_dir = self.base_dir / "backups" / backup_name
         backup_dir.mkdir(parents=True, exist_ok=True)
-        
+
         import shutil
         for file in self.preferences_dir.glob("*.jsonl"):
             shutil.copy(file, backup_dir / file.name)
-        
+
         return str(backup_dir)
     
     def reset(self, confirm: bool = True) -> None:
-        """Reset all preferences (with backup)"""
+        """
+        Reset all preferences with optional locking (with backup).
+
+        Args:
+            confirm: Whether to prompt user for confirmation (default: True)
+        """
+        reset_fn = self._do_reset
+
+        if self.use_locking:
+            lock_name = "storage_reset"
+            if not self.distributed_lock.acquire(lock_name, timeout_seconds=5.0):
+                raise RuntimeError(f"Could not acquire lock for {lock_name}")
+            try:
+                return reset_fn(confirm)
+            finally:
+                self.distributed_lock.release(lock_name)
+        else:
+            return reset_fn(confirm)
+
+    def _do_reset(self, confirm: bool = True) -> None:
+        """Internal reset implementation."""
         if confirm:
             response = input("⚠️  Clear all preferences? This will back up old data. (y/n): ")
             if response.lower() != 'y':
                 return
-        
+
         self.backup(f"reset_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        
+
         self.preferences.clear()
         self.associations.clear()
         self.contexts.clear()
         self.signals.clear()
-        
+
         print("✅ Preferences reset. Backup created.")
+
+    def compact(self) -> Dict[str, Dict[str, int]]:
+        """
+        Compact JSONL files by removing duplicate records, keeping only the latest
+        version per unique ID.
+
+        For each JSONL file (preferences, associations, contexts, signals):
+        - Read all records
+        - Keep only the latest version per unique ID
+        - Rewrite the file
+
+        Returns:
+            Dictionary mapping filename to compaction stats:
+            {
+                "filename": {
+                    "before": int (original record count),
+                    "after": int (records after compaction),
+                    "removed": int (records removed)
+                }
+            }
+        """
+        compact_fn = self._do_compact
+
+        if self.use_locking:
+            lock_name = "storage_compact"
+            if not self.distributed_lock.acquire(lock_name, timeout_seconds=5.0):
+                raise RuntimeError(f"Could not acquire lock for {lock_name}")
+            try:
+                return compact_fn()
+            finally:
+                self.distributed_lock.release(lock_name)
+        else:
+            return compact_fn()
+
+    def _do_compact(self) -> Dict[str, Dict[str, int]]:
+        """Internal compaction implementation."""
+        results = {}
+
+        # List of storage objects to compact
+        storage_files = [
+            ("preferences", self.preferences),
+            ("associations", self.associations),
+            ("contexts", self.contexts),
+            ("signals", self.signals)
+        ]
+
+        for file_key, storage in storage_files:
+            all_records = storage.read_all()
+            before_count = len(all_records)
+
+            # Keep only the latest version per ID
+            seen_ids = {}
+            for record in all_records:
+                record_id = record.get("id")
+                if record_id:
+                    # Store the record (later ones overwrite earlier ones)
+                    seen_ids[record_id] = record
+
+            # Rewrite file with deduplicated records
+            compacted_records = list(seen_ids.values())
+            after_count = len(compacted_records)
+            storage._rewrite_all(compacted_records)
+
+            results[file_key] = {
+                "before": before_count,
+                "after": after_count,
+                "removed": before_count - after_count
+            }
+
+        # Also compact metrics.jsonl if it exists
+        metrics_file = Path(os.path.expanduser("~/.adaptive-cli/metrics.jsonl"))
+        if metrics_file.exists():
+            try:
+                metrics_storage = JSONLStorage(str(metrics_file))
+                all_records = metrics_storage.read_all()
+                before_count = len(all_records)
+
+                # Keep only the latest version per ID (if metrics have IDs)
+                seen_ids = {}
+                for record in all_records:
+                    record_id = record.get("id")
+                    if record_id:
+                        seen_ids[record_id] = record
+                    else:
+                        # If no ID, keep the record (append-only metrics)
+                        pass
+
+                # Rewrite file with deduplicated records
+                if seen_ids:
+                    compacted_records = list(seen_ids.values())
+                else:
+                    # If no records have IDs, keep all as-is (metrics are append-only)
+                    compacted_records = all_records
+
+                after_count = len(compacted_records)
+                if before_count != after_count:
+                    metrics_storage._rewrite_all(compacted_records)
+
+                results["metrics"] = {
+                    "before": before_count,
+                    "after": after_count,
+                    "removed": before_count - after_count
+                }
+            except Exception as e:
+                logger.warning(f"Error compacting metrics.jsonl: {e}")
+
+        return results
+
+    def compact_all(self) -> None:
+        """
+        Convenience method to run compact() and log the results.
+
+        Calls compact() and prints a human-readable summary of compaction results.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        results = self.compact()
+
+        # Log summary
+        logger.info("JSONL Compaction Results:")
+        total_before = 0
+        total_after = 0
+        total_removed = 0
+
+        for filename, stats in results.items():
+            before = stats["before"]
+            after = stats["after"]
+            removed = stats["removed"]
+            total_before += before
+            total_after += after
+            total_removed += removed
+
+            logger.info(
+                f"  {filename:15s}: {before:6d} -> {after:6d} records "
+                f"({removed:6d} removed)"
+            )
+
+        logger.info(f"Total: {total_before} -> {total_after} records ({total_removed} removed)")
 
 
 if __name__ == "__main__":
