@@ -517,9 +517,15 @@ Examples:
     sync_sub.add_parser("pull", help="Pull from remote and import into local SQLite")
     sync_sub.add_parser("status", help="Show sync repo git status")
 
+    parser.add_argument(
+        "--base-dir",
+        default=None,
+        help="Override base directory for storage (default: ~/.adaptive-cli)"
+    )
+
     args = parser.parse_args()
-    
-    cli = AdaptivePreferenceCLI()
+
+    cli = AdaptivePreferenceCLI(base_dir=args.base_dir)
     
     # Route commands
     try:
