@@ -1,0 +1,188 @@
+"""
+sync.py — Export/import preferences between local SQLite and a git repo.
+
+Workflow for push:
+  1. export() — dump all SQLite tables to JSONL files in the sync repo dir
+  2. git_push() — git add + commit + push in the sync repo
+
+Workflow for pull:
+  1. git_pull() — git pull in the sync repo
+  2. import_from() — upsert JSONL files from sync repo into local SQLite
+
+The export format is plain JSONL (one JSON object per line), identical to
+the old storage format, so the files are human-readable and git-diffable.
+"""
+
+import json
+import os
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from typing import Dict
+
+from scripts.models import Association, ContextStack, Preference, Signal
+from scripts.storage import PreferenceStorageManager
+
+
+class PreferenceSync:
+    """Static helpers for export/import. Git operations in SyncRunner."""
+
+    @staticmethod
+    def export(mgr: PreferenceStorageManager, dest_dir: Path) -> Dict[str, int]:
+        """
+        Dump all SQLite data to JSONL files in dest_dir.
+        Returns counts of records written per table.
+        """
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        counts: Dict[str, int] = {}
+
+        prefs = mgr.preferences.get_all_preferences()
+        _write_jsonl(dest_dir / "all_preferences.jsonl", [p.to_dict() for p in prefs])
+        counts["preferences"] = len(prefs)
+
+        assocs = mgr.associations.get_all_associations()
+        _write_jsonl(dest_dir / "associations.jsonl", [a.to_dict() for a in assocs])
+        counts["associations"] = len(assocs)
+
+        ctxs = mgr.contexts.get_all_contexts()
+        _write_jsonl(dest_dir / "contexts.jsonl", [c.to_dict() for c in ctxs])
+        counts["contexts"] = len(ctxs)
+
+        sigs = mgr.signals.get_all_signals()
+        _write_jsonl(dest_dir / "signals.jsonl", [s.to_dict() for s in sigs])
+        counts["signals"] = len(sigs)
+
+        return counts
+
+    @staticmethod
+    def import_from(mgr: PreferenceStorageManager, src_dir: Path) -> Dict[str, int]:
+        """
+        Upsert JSONL files from src_dir into local SQLite.
+        Idempotent — running twice produces no duplicates.
+        Returns counts of records imported per table.
+        """
+        src_dir = Path(src_dir)
+        counts: Dict[str, int] = {"preferences": 0, "associations": 0, "contexts": 0, "signals": 0}
+
+        for d in _read_jsonl(src_dir / "all_preferences.jsonl"):
+            try:
+                mgr.preferences.save_preference(Preference.from_dict(d))
+                counts["preferences"] += 1
+            except Exception as e:
+                print(f"  ⚠  preference {d.get('id')}: {e}")
+
+        for d in _read_jsonl(src_dir / "associations.jsonl"):
+            try:
+                mgr.associations.save_association(Association.from_dict(d))
+                counts["associations"] += 1
+            except Exception as e:
+                print(f"  ⚠  association {d.get('id')}: {e}")
+
+        for d in _read_jsonl(src_dir / "contexts.jsonl"):
+            try:
+                mgr.contexts.save_context(ContextStack.from_dict(d))
+                counts["contexts"] += 1
+            except Exception as e:
+                print(f"  ⚠  context {d.get('id')}: {e}")
+
+        for d in _read_jsonl(src_dir / "signals.jsonl"):
+            try:
+                mgr.signals.save_signal(Signal.from_dict(d))
+                counts["signals"] += 1
+            except Exception as e:
+                print(f"  ⚠  signal {d.get('id')}: {e}")
+
+        return counts
+
+
+class SyncRunner:
+    """Orchestrates git operations + export/import for push and pull."""
+
+    def __init__(self, mgr: PreferenceStorageManager, sync_repo_path: str) -> None:
+        self.mgr = mgr
+        self.repo = Path(sync_repo_path).expanduser()
+
+    def push(self) -> Dict:
+        """Export SQLite → JSONL, git add+commit+push. Returns result dict."""
+        if not self.repo.exists():
+            raise FileNotFoundError(
+                f"Sync repo not found: {self.repo}\n"
+                "Run: adaptive-cli sync configure --repo-path <path>"
+            )
+
+        counts = PreferenceSync.export(self.mgr, self.repo)
+
+        status = _git(["status", "--porcelain"], cwd=self.repo)
+        if not status.strip():
+            return {"status": "up-to-date", "counts": counts}
+
+        _git(["add",
+              "all_preferences.jsonl", "associations.jsonl",
+              "contexts.jsonl", "signals.jsonl"], cwd=self.repo)
+
+        msg = f"sync: export preferences {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        _git(["commit", "-m", msg], cwd=self.repo)
+        _git(["push"], cwd=self.repo)
+
+        return {"status": "pushed", "counts": counts}
+
+    def pull(self) -> Dict:
+        """git pull, then import JSONL → SQLite. Returns result dict."""
+        if not self.repo.exists():
+            raise FileNotFoundError(
+                f"Sync repo not found: {self.repo}\n"
+                "Run: adaptive-cli sync configure --repo-path <path>"
+            )
+
+        _git(["pull"], cwd=self.repo)
+        counts = PreferenceSync.import_from(self.mgr, self.repo)
+        return {"status": "pulled", "counts": counts}
+
+    def status(self) -> str:
+        """Return git status output from the sync repo."""
+        if not self.repo.exists():
+            return f"Sync repo not configured or not found: {self.repo}"
+        return _git(["status", "--short"], cwd=self.repo)
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _write_jsonl(path: Path, records: list) -> None:
+    """Write list of dicts as JSONL (atomic via tmp file)."""
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    os.replace(tmp, path)
+
+
+def _read_jsonl(path: Path) -> list:
+    if not path.exists():
+        return []
+    out = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    return out
+
+
+def _git(args: list, cwd: Path) -> str:
+    """Run a git command in cwd. Raises RuntimeError on non-zero exit."""
+    result = subprocess.run(
+        ["git"] + args,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed:\n{result.stderr.strip()}"
+        )
+    return result.stdout
