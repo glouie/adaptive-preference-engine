@@ -174,6 +174,13 @@ class TestAssociationStorage:
         results = mgr.associations.get_associations_from("src")
         assert len(results) == 2
 
+    def test_get_associations_to(self, mgr):
+        mgr.associations.save_association(make_assoc(id="a1", from_id="src1", to_id="tgt"))
+        mgr.associations.save_association(make_assoc(id="a2", from_id="src2", to_id="tgt"))
+        mgr.associations.save_association(make_assoc(id="a3", from_id="tgt", to_id="other"))
+        results = mgr.associations.get_associations_to("tgt")
+        assert len(results) == 2
+
     def test_get_all(self, mgr):
         for i in range(4):
             mgr.associations.save_association(make_assoc(id=f"bulk_{i}"))
@@ -212,6 +219,12 @@ class TestContextStorage:
         mgr.contexts.save_context(make_context(id="c2", scope="project"))
         mgr.contexts.save_context(make_context(id="c3", scope="base"))
         results = mgr.contexts.get_contexts_by_scope("project")
+        assert len(results) == 2
+
+    def test_get_all_contexts(self, mgr):
+        mgr.contexts.save_context(make_context(id="c1", scope="project"))
+        mgr.contexts.save_context(make_context(id="c2", scope="base"))
+        results = mgr.contexts.get_all_contexts()
         assert len(results) == 2
 
 
@@ -274,7 +287,7 @@ class TestPreferenceStorageManager:
         assert info["associations_count"] == 1
         assert info["signals_count"] == 0
 
-    def test_backup_creates_copy(self, mgr, tmp_path):
+    def test_backup_creates_copy(self, mgr):
         mgr.preferences.save_preference(make_pref(id="backup_test"))
         backup_path = mgr.backup("test_backup")
         assert Path(backup_path).exists()
