@@ -17,12 +17,11 @@ dev = [
 ]
 
 [project.scripts]
-adaptive-cli         = "scripts.cli:main"
-adaptive-cli-migrate = "scripts.migrate_to_sqlite:main"
+adaptive-cli = "scripts.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["scripts*"]
+where = [".", "src"]
+include = ["scripts*", "adaptive_preference_engine*"]
 exclude = ["tests*", "build*"]
 
 [tool.pytest.ini_options]
