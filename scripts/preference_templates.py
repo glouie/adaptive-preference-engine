@@ -274,7 +274,7 @@ class PreferenceTemplateManager:
         """Initialize template manager with optional storage"""
         self.storage = storage
 
-    def apply_template(self, template_name: str, storage: PreferenceStorageManager) -> int:
+    def apply_template(self, template_name: str, storage: PreferenceStorageManager) -> List[str]:
         """
         Apply a template to the preference storage.
         Creates standard preferences from the template.
@@ -284,17 +284,17 @@ class PreferenceTemplateManager:
             storage: PreferenceStorageManager instance
 
         Returns:
-            Number of preferences created
+            List of created preference IDs
         """
         if template_name not in self.TEMPLATES:
             raise ValueError(f"Unknown template: {template_name}")
 
         template = self.TEMPLATES[template_name]
-        preferences_created = 0
+        created_ids: List[str] = []
 
         for pref_spec in template["preferences"]:
-            # Generate unique ID based on path
-            pref_id = pref_spec.get("name", generate_id("pref"))
+            # Generate unique ID for each created preference
+            pref_id = generate_id("pref")
 
             # Create preference object
             pref = Preference(
@@ -311,9 +311,9 @@ class PreferenceTemplateManager:
 
             # Save preference
             storage.preferences.save_preference(pref)
-            preferences_created += 1
+            created_ids.append(pref_id)
 
-        return preferences_created
+        return created_ids
 
     def list_templates(self) -> List[Dict]:
         """
@@ -434,7 +434,7 @@ if __name__ == "__main__":
     # Test with storage
     storage = PreferenceStorageManager("/tmp/test_templates")
     created = manager.apply_template("DEVELOPER", storage)
-    print(f"\nApplied Developer template: {created} preferences created")
+    print(f"\nApplied Developer template: {len(created)} preferences created")
 
     # Verify preferences were saved
     all_prefs = storage.preferences.get_all_preferences()

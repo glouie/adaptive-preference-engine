@@ -13,7 +13,7 @@ import platform
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
-from scripts.paths import get_base_dir
+from adaptive_preference_engine.paths import get_base_dir
 
 # Configure logging
 logger = logging.getLogger(__name__)

@@ -187,6 +187,10 @@ class SignificanceAwareConsolidationEngine(ConsolidationEngine):
                 if pref:
                     pref.learning.significance_score = 1.0 - trend_result.p_value
                     pref.learning.p_value = trend_result.p_value
+                    pref.learning.effect_size = trend_result.effect_size
+                    pref.learning.autocorrelation = trend_result.autocorrelation
+                    pref.learning.n_signals = trend_result.n_signals
+                    pref.learning.fdr_significant = is_fdr_significant
                     self.storage.preferences.save_preference(pref)
 
                 # Track FDR-significant preferences

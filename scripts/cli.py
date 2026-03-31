@@ -5,20 +5,17 @@ cli.py - Command-line interface for adaptive preference engine
 
 import argparse
 import sys
-from pathlib import Path
 from datetime import datetime
-
-# Add project root to path so `scripts` package is importable
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.models import (
     Preference, Association, ContextStack, generate_id
 )
 from scripts.storage import PreferenceStorageManager
-from scripts.preference_loader import PreferenceLoader
-from scripts.signal_processor import SignalProcessor, StrengthCalculator
+from adaptive_preference_engine.services.loading import PreferenceLoader
+from adaptive_preference_engine.services.signals import SignalProcessor, StrengthCalculator
 from scripts.significance_consolidation_bridge import get_integrated_engine
 from scripts.onboarding import OnboardingSystem, check_first_run_and_onboard
+from scripts.paths import get_base_dir
 from scripts.cli_utils import (
     header, separator, success, error, warn,
     term_width, BOLD, DIM, CYAN, GREEN, YELLOW, RED, RESET
@@ -29,14 +26,12 @@ class AdaptivePreferenceCLI:
     """CLI interface for preference engine"""
 
     def __init__(self, base_dir: str = None):
-        if base_dir is None:
-            base_dir = Path.home() / ".adaptive-cli"
-
-        self.storage = PreferenceStorageManager(str(base_dir))
+        resolved_base_dir = get_base_dir(base_dir)
+        self.storage = PreferenceStorageManager(str(resolved_base_dir))
         self.loader = PreferenceLoader(self.storage)
         self.processor = SignalProcessor(self.storage)
         self.strength_calc = StrengthCalculator(self.storage)
-        self.consolidation = get_integrated_engine(str(base_dir))
+        self.consolidation = get_integrated_engine(str(resolved_base_dir))
 
     # ---- Preference Management ----
 
@@ -128,8 +123,10 @@ class AdaptivePreferenceCLI:
         if confirm.lower() != 'y':
             print("Cancelled.")
             return
-        self.storage.delete_preference(args.pref_id)
-        print(success(f"Deleted preference: {pref.path}"))
+        if self.storage.delete_preference(args.pref_id):
+            print(success(f"Deleted preference: {pref.path}"))
+        else:
+            print(error(f"Failed to delete preference: {args.pref_id}"))
 
     def cmd_update_preference(self, args):
         """Update an existing preference"""
@@ -261,7 +258,11 @@ class AdaptivePreferenceCLI:
         if signal.preferences_affected:
             print(f"\n{CYAN}What I learned:{RESET}")
             for pref_change in signal.preferences_affected:
-                pref_id = pref_change.get('preference_id') or pref_change.get('id', '')
+                pref_id = (
+                    pref_change.get("pref_id")
+                    or pref_change.get("preference_id")
+                    or pref_change.get("id", "")
+                )
                 pref = self.storage.preferences.get_preference(pref_id) if pref_id else None
                 if pref:
                     print(f"   {pref.path}: confidence now {pref.confidence:.0%} ({pref.learning.use_count} uses)")
@@ -314,7 +315,9 @@ class AdaptivePreferenceCLI:
         agent_json = self.loader.load_for_agent(
             context_tags=args.context,
             primary_pref_id=args.primary,
-            stack_contexts=args.stack
+            stack_contexts=args.stack,
+            compact=args.compact,
+            associated_limit=args.associated_limit,
         )
 
         if args.output:
@@ -412,15 +415,38 @@ class AdaptivePreferenceCLI:
         onboarding = OnboardingSystem(str(self.storage.base_dir))
 
         if args.reset:
-            complete_file = Path(self.storage.base_dir) / "onboarding_complete"
-            if complete_file.exists():
-                complete_file.unlink()
+            onboarding.reset_all_setup()
             print(success("Onboarding reset. Run 'adaptive-cli onboard' to restart."))
         else:
             if not onboarding.is_first_run():
-                print("✓ You've already completed onboarding!")
-                print("  Run 'adaptive-cli onboard --reset' to restart the tutorial.")
+                while True:
+                    print("✓ You've already completed onboarding!")
+                    print("  1. Review current setup")
+                    print("  2. Modify setup")
+                    print("  3. Review tutorial again")
+                    print("  4. Start over from scratch")
+                    print("  5. Exit")
+
+                    choice = input("Select an option [5]: ").strip()
+                    if choice == "1":
+                        onboarding.show_setup_summary()
+                        continue
+                    if choice == "2":
+                        onboarding.run_modify_setup()
+                        return
+                    if choice == "3":
+                        onboarding.state.state["current_step"] = 0
+                        onboarding.state._save_state()
+                        onboarding.run_tutorial(skip_demo=False)
+                        return
+                    if choice == "4":
+                        onboarding.reset_all_setup()
+                        onboarding.run_tutorial(skip_demo=False)
+                        return
+                    print("Exiting onboarding.")
+                    break
                 return
+
             onboarding.run_tutorial(skip_demo=False)
 
     def cmd_digest_weekly(self, args):
@@ -552,6 +578,10 @@ All commands:
     agent_parser.add_argument("--primary", default=None)
     agent_parser.add_argument("--stack", nargs="+", default=None)
     agent_parser.add_argument("--output", default=None)
+    agent_parser.add_argument("--compact", action="store_true",
+                              help="Return a smaller context payload without recursive preference trees")
+    agent_parser.add_argument("--associated-limit", type=int, default=5,
+                              help="Maximum associated preferences when using --compact")
 
     # Maintenance
     subparsers.add_parser("stats", help="Show statistics")

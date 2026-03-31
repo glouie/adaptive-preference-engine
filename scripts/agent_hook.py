@@ -6,8 +6,8 @@ Provides preferences to agents and handles feedback/corrections
 import json
 from typing import Dict, List, Optional, Any
 from scripts.storage import PreferenceStorageManager
-from scripts.preference_loader import PreferenceLoader
-from scripts.signal_processor import SignalProcessor
+from adaptive_preference_engine.services.loading import PreferenceLoader
+from adaptive_preference_engine.services.signals import SignalProcessor
 
 
 class AgentPreferenceHook:
