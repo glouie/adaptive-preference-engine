@@ -398,6 +398,7 @@ class AdaptivePreferenceCLI:
 
         # Show unpushed preference counts
         pending = runner.pending_counts()
+        status = runner.status()
         if pending:
             print(f"\n⚠️  Unpushed changes (run 'adaptive-cli sync push'):")
             for table, count in pending.items():
@@ -406,12 +407,13 @@ class AdaptivePreferenceCLI:
             total_prefs = self.storage.get_storage_info()["preferences_count"]
             if total_prefs == 0:
                 print("   No preferences to sync yet.")
+            elif status.strip():
+                print("⚠️  Local data is up to date, but changes are not yet committed to the sync repo.")
             else:
-                print("✅ All preferences are pushed.")
+                print("✅ All preferences are pushed and synced.")
 
-        # Show git repo status
-        status = runner.status()
-        if status.strip():
+        # Show git repo status only when pending changes exist (dirty repo not already reported above)
+        if pending and status.strip():
             print(f"\n⚠️  Uncommitted changes in repo:")
             print(status)
 
@@ -472,8 +474,13 @@ class AdaptivePreferenceCLI:
             print(f"❌ {e}")
             return
         created = _dt.now().isoformat()
+        existing_paths = {p.path for p in self.storage.preferences.get_all_preferences()}
         count = 0
+        skipped = 0
         for p in tmpl["preferences"]:
+            if p["path"] in existing_paths:
+                skipped += 1
+                continue
             pref = Preference(
                 id=generate_id("pref"),
                 path=p["path"],
@@ -489,8 +496,14 @@ class AdaptivePreferenceCLI:
             )
             self.storage.preferences.save_preference(pref)
             count += 1
-        print(f"✅ Applied template '{tmpl['name']}': {count} preferences created.")
-        print("   Run 'adaptive-cli pref list' to see them.")
+        if count == 0 and skipped > 0:
+            print(f"⚠️  All preferences in this template already exist. Nothing was applied.")
+        elif skipped > 0:
+            print(f"✅ Applied template '{tmpl['name']}': {count} preferences created, {skipped} skipped (already exists).")
+        else:
+            print(f"✅ Applied template '{tmpl['name']}': {count} preferences created.")
+        if count > 0:
+            print("   Run 'adaptive-cli pref list' to see them.")
 
 
 def main():
@@ -525,6 +538,10 @@ Examples:
 
   # Pull preferences on another machine
   adaptive-cli sync pull
+
+  # Browse and apply built-in preference templates
+  adaptive-cli template list
+  adaptive-cli template apply python-developer
         """
     )
     
