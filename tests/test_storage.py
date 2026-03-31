@@ -340,6 +340,8 @@ class TestPreferenceStorageManager:
     def test_context_manager(self, tmp_path):
         from scripts.storage import PreferenceStorageManager
         with PreferenceStorageManager(str(tmp_path)) as mgr:
-            assert mgr._conn is not None
-        # After exit, close() sets _conn to None (idempotent)
-        assert mgr._conn is None
+            assert not mgr._closed
+        # After exit, close() marks as closed (idempotent — safe to call again)
+        assert mgr._closed
+        mgr.close()  # second call must not raise
+        assert mgr._closed

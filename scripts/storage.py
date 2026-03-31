@@ -159,6 +159,10 @@ class PreferenceStorage(SQLiteDB):
         rows = self._conn.execute("SELECT * FROM preferences").fetchall()
         return [self._row_to_preference(r) for r in rows]
 
+    def delete_preference(self, pref_id: str) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM preferences WHERE id = ?", (pref_id,))
+
     @staticmethod
     def _row_to_preference(row: sqlite3.Row) -> Preference:
         d = dict(row)
@@ -383,6 +387,10 @@ class SignalStorage(SQLiteDB):
         rows = self._conn.execute("SELECT * FROM signals").fetchall()
         return [self._row_to_signal(r) for r in rows]
 
+    def delete_signal(self, signal_id: str) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM signals WHERE id = ?", (signal_id,))
+
     @staticmethod
     def _row_to_signal(row: sqlite3.Row) -> Signal:
         d = dict(row)
@@ -416,6 +424,7 @@ class PreferenceStorageManager:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.commit()
         self._apply_migrations()
+        self._closed = False
         self.db_path = db_path
         self.preferences  = PreferenceStorage(self._conn)
         self.associations = AssociationStorage(self._conn)
@@ -487,6 +496,14 @@ class PreferenceStorageManager:
             )
         return cursor.rowcount
 
+    def delete_preference(self, pref_id: str) -> None:
+        """Convenience delegate — remove a preference by ID."""
+        self.preferences.delete_preference(pref_id)
+
+    def delete_signal(self, signal_id: str) -> None:
+        """Convenience delegate — remove a signal by ID."""
+        self.signals.delete_signal(signal_id)
+
     def reset(self) -> None:
         """Wipe all rows from every table (schema stays intact)."""
         with self._conn:
@@ -495,14 +512,14 @@ class PreferenceStorageManager:
 
     def close(self) -> None:
         """Close the SQLite connection and checkpoint the WAL file. Idempotent."""
-        if self._conn is None:
+        if self._closed:
             return
+        self._closed = True
         self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._conn.close()
-        self._conn = None
 
     def __enter__(self) -> "PreferenceStorageManager":
         return self
 
-    def __exit__(self, *args: object) -> None:
+    def __exit__(self, _exc_type: object, _exc_val: object, _exc_tb: object) -> None:
         self.close()
