@@ -84,6 +84,11 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS idx_sig_timestamp ON signals(timestamp);
 CREATE INDEX IF NOT EXISTS idx_sig_type      ON signals(type);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version     INTEGER NOT NULL,
+    applied_at  TEXT NOT NULL
+);
 """
 
 
@@ -396,6 +401,8 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
+    _CURRENT_VERSION = 1
+
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
             base_dir = os.path.expanduser("~/.adaptive-cli")
@@ -408,11 +415,28 @@ class PreferenceStorageManager:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.commit()
+        self._apply_migrations()
         self.db_path = db_path
         self.preferences  = PreferenceStorage(self._conn)
         self.associations = AssociationStorage(self._conn)
         self.contexts     = ContextStorage(self._conn)
         self.signals      = SignalStorage(self._conn)
+
+    def _apply_migrations(self) -> None:
+        """Ensure schema_version reflects the current version. Runs pending migrations."""
+        row = self._conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()
+        current = row[0] if row[0] is not None else 0
+
+        if current < 1:
+            # Version 1: initial SQLite schema (preferences, associations, contexts, signals)
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (1, datetime.now().isoformat()),
+                )
+            print(f"  [storage] Applied migration: schema v1")
 
     def get_storage_info(self) -> Dict[str, Any]:
         return {
@@ -441,6 +465,15 @@ class PreferenceStorageManager:
         dst_conn = sqlite3.connect(str(backup_path))
         try:
             self._conn.backup(dst_conn)
+            result = dst_conn.execute("PRAGMA integrity_check(1)").fetchone()[0]
+            if result != "ok":
+                raise RuntimeError(
+                    f"Backup integrity check failed at {backup_path}: {result}"
+                )
+        except sqlite3.Error as e:
+            raise RuntimeError(
+                f"Database backup failed while writing to {backup_path}: {e}"
+            ) from e
         finally:
             dst_conn.close()
         return str(backup_dir)
@@ -459,3 +492,14 @@ class PreferenceStorageManager:
         with self._conn:
             for table in ("preferences", "associations", "contexts", "signals"):
                 self._conn.execute(f"DELETE FROM {table}")
+
+    def close(self) -> None:
+        """Close the SQLite connection and checkpoint the WAL file."""
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self._conn.close()
+
+    def __enter__(self) -> "PreferenceStorageManager":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
