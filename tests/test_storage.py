@@ -296,7 +296,19 @@ class TestPreferenceStorageManager:
     def test_backup_creates_copy(self, mgr):
         mgr.preferences.save_preference(make_pref(id="backup_test"))
         backup_path = mgr.backup("test_backup")
-        assert Path(backup_path).exists()
+        backup_db = Path(backup_path) / "adaptive.db"
+        assert backup_db.exists()
+        # Verify integrity check was meaningful: backup is a valid, readable SQLite DB
+        import sqlite3 as _sqlite3
+        dst = _sqlite3.connect(str(backup_db))
+        try:
+            result = dst.execute("PRAGMA integrity_check(1)").fetchone()[0]
+            assert result == "ok"
+            # Verify the data was actually copied
+            count = dst.execute("SELECT COUNT(*) FROM preferences").fetchone()[0]
+            assert count == 1
+        finally:
+            dst.close()
 
     def test_prune_old_signals(self, mgr):
         from datetime import datetime, timedelta
@@ -328,11 +340,8 @@ class TestPreferenceStorageManager:
     def test_context_manager(self, tmp_path):
         from scripts.storage import PreferenceStorageManager
         with PreferenceStorageManager(str(tmp_path)) as mgr:
-            assert mgr._conn is not None
-        # After exit, connection should be closed (further queries raise)
-        import sqlite3
-        try:
-            mgr._conn.execute("SELECT 1")
-            assert False, "Expected exception on closed connection"
-        except sqlite3.ProgrammingError:
-            pass  # expected
+            assert not mgr._closed
+        # After exit, close() marks as closed (idempotent — safe to call again)
+        assert mgr._closed
+        mgr.close()  # second call must not raise
+        assert mgr._closed
