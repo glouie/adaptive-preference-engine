@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from scripts.models import Signal, Association, AssociationLearning, generate_id
 from scripts.storage import PreferenceStorageManager
+from scripts.bayesian_strength_calculator import BayesianStrengthCalculator
 import json
 
 
@@ -346,35 +347,31 @@ class SignalProcessor:
     
     def _calculate_strength(self, learning: AssociationLearning) -> float:
         """
-        Calculate association strength from learning data.
-        Formula: frequency × trend × emotion × recency
+        Calculate association strength from learning data using Bayesian inference.
+
+        Delegates to BayesianStrengthCalculator which models strength as a
+        proper posterior: P(association|evidence) ∝ P(evidence|association) × P(prior).
+
+        Inputs sourced from AssociationLearning:
+          - use_count       → frequency likelihood (sigmoid-scaled)
+          - satisfaction_rate → satisfaction likelihood
+          - trend           → trend likelihood
+          - last_used       → recency decay (days since last use)
         """
-        
-        # Frequency (use count)
-        frequency_score = min(learning.use_count / 50, 1.0)  # Saturate at 50
-        
-        # Trend multiplier
-        trend_map = {
-            "strongly_increasing": 1.15,
-            "increasing": 1.05,
-            "stable": 1.0,
-            "decreasing": 0.85,
-            "strongly_decreasing": 0.7
-        }
-        trend_multiplier = trend_map.get(learning.trend, 1.0)
-        
-        # Emotion (satisfaction)
-        emotion_multiplier = 0.5 + (learning.satisfaction_rate * 0.5)  # 0.5 to 1.0
-        
-        # Recency (time decay)
-        days_unused = (datetime.fromisoformat(datetime.now().isoformat()) -
-                       datetime.fromisoformat(learning.last_used)).days
-        recency_multiplier = 0.98 ** days_unused  # 2% decay per day
-        
-        # Combine
-        strength = frequency_score * trend_multiplier * emotion_multiplier * recency_multiplier
-        
-        return min(strength, 1.0)  # Cap at 1.0
+        days_unused = (
+            datetime.fromisoformat(datetime.now().isoformat()) -
+            datetime.fromisoformat(learning.last_used)
+        ).days
+
+        calculator = BayesianStrengthCalculator()
+        result = calculator.calculate_strength_bayesian(
+            use_count=learning.use_count,
+            satisfaction_rate=learning.satisfaction_rate,
+            trend=learning.trend,
+            recency_days_unused=float(days_unused)
+        )
+
+        return result["strength"]
 
 
 class StrengthCalculator:
