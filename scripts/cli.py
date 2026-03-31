@@ -22,6 +22,8 @@ from scripts.signal_processor import SignalProcessor, StrengthCalculator
 from scripts.config import AdaptiveConfig
 from scripts.sync import SyncRunner
 from scripts.preference_templates import list_templates, get_template
+from scripts.onboarding import OnboardingSystem
+from scripts.cli_utils import success, error, warn
 
 
 class AdaptivePreferenceCLI:
@@ -413,6 +415,42 @@ class AdaptivePreferenceCLI:
             print(f"\n⚠️  Uncommitted changes in repo:")
             print(status)
 
+    def cmd_onboard(self, args):
+        """Run interactive onboarding tutorial."""
+        onboarding = OnboardingSystem(str(self.storage.base_dir))
+        if args.reset:
+            onboarding.reset_all_setup()
+            print(success("Onboarding reset. Run 'adaptive-cli onboard' to restart."))
+            return
+        if not onboarding.is_first_run():
+            while True:
+                print("✓ You've already completed onboarding!")
+                print("  1. Review current setup")
+                print("  2. Modify setup")
+                print("  3. Review tutorial again")
+                print("  4. Start over from scratch")
+                print("  5. Exit")
+                choice = input("Select an option [5]: ").strip()
+                if choice == "1":
+                    onboarding.show_setup_summary()
+                    continue
+                if choice == "2":
+                    onboarding.run_modify_setup()
+                    return
+                if choice == "3":
+                    onboarding.state.state["current_step"] = 0
+                    onboarding.state._save_state()
+                    onboarding.run_tutorial(skip_demo=False)
+                    return
+                if choice == "4":
+                    onboarding.reset_all_setup()
+                    onboarding.run_tutorial(skip_demo=False)
+                    return
+                print("Exiting onboarding.")
+                break
+            return
+        onboarding.run_tutorial(skip_demo=False)
+
     def cmd_template_list(self, args):
         """List available preference templates."""
         templates = list_templates()
@@ -596,6 +634,10 @@ Examples:
     sync_sub.add_parser("pull", help="Pull from remote and import into local SQLite")
     sync_sub.add_parser("status", help="Show sync repo git status")
 
+    # onboard
+    onboard_parser = subparsers.add_parser("onboard", help="Interactive setup tutorial")
+    onboard_parser.add_argument("--reset", action="store_true", help="Reset and restart tutorial")
+
     # template
     template_parser = subparsers.add_parser("template", help="Apply built-in preference templates")
     template_sub = template_parser.add_subparsers(dest="template_subcommand")
@@ -672,6 +714,9 @@ Examples:
                 cli.cmd_sync_status(args)
             else:
                 sync_parser.print_help()
+
+        elif args.command == "onboard":
+            cli.cmd_onboard(args)
 
         elif args.command == "template":
             if args.template_subcommand == "list":

@@ -4,6 +4,7 @@ preference_templates.py — Built-in preference templates.
 A template is a named collection of preferences for a common context.
 Apply with: adaptive-cli template apply <name>
 """
+from datetime import datetime
 from typing import Dict, List, Any
 
 # Each template entry:
@@ -101,3 +102,37 @@ def get_template(key: str) -> Dict[str, Any]:
         available = ", ".join(TEMPLATES.keys())
         raise KeyError(f"Template '{key}' not found. Available: {available}")
     return TEMPLATES[key]
+
+
+class PreferenceTemplateManager:
+    """Compatibility class used by onboarding.py to list and apply templates."""
+
+    def list_templates(self) -> List[Dict[str, Any]]:
+        return list_templates()
+
+    def apply_template(self, template_key: str, storage: Any) -> List[str]:
+        """Apply a template to storage. Returns list of created preference IDs."""
+        from scripts.models import Preference, generate_id
+        tmpl = get_template(template_key)
+        created = datetime.now().isoformat()
+        ids = []
+        existing_paths = {p.path for p in storage.preferences.get_all_preferences()}
+        for p in tmpl["preferences"]:
+            if p["path"] in existing_paths:
+                continue
+            pref = Preference(
+                id=generate_id("pref"),
+                path=p["path"],
+                parent_id=None,
+                name=p["name"],
+                type=p["type"],
+                value=p.get("value"),
+                confidence=0.7,
+                description=p.get("description", ""),
+                created=created,
+                last_updated=created,
+                auto_detected=False,
+            )
+            storage.preferences.save_preference(pref)
+            ids.append(pref.id)
+        return ids
