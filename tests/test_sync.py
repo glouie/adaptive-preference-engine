@@ -1,11 +1,11 @@
 """Tests for config and sync modules. Run: pytest tests/test_sync.py -v"""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
+
 import pytest
-from unittest.mock import patch, MagicMock
-import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -112,62 +112,50 @@ class TestAdaptiveConfig:
         assert raw["sync_repo_path"] == "/foo/bar"
 
 
+def _init_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init", str(path)], capture_output=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@test.com"], capture_output=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], capture_output=True)
+
+
 class TestSyncRunner:
     def test_push_up_to_date(self, src_mgr, tmp_path):
-        """push() returns up-to-date when git status is clean."""
+        """push() returns up-to-date when git status is clean after first push."""
         repo = tmp_path / "repo"
         repo.mkdir()
-        # Mock: git status returns empty (clean)
-        # Mock: git init so repo looks like a git repo
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            runner = SyncRunner(src_mgr, str(repo))
-            result = runner.push()
+        _init_git_repo(repo)
+        # Push once to commit the files
+        runner = SyncRunner(src_mgr, str(repo))
+        runner.push()
+        # Push again with no changes — status should be up-to-date
+        result = runner.push()
         assert result["status"] == "up-to-date"
 
     def test_push_commits_and_returns_committed_on_no_remote(self, src_mgr, tmp_path):
         """push() exports JSONL, commits, returns 'committed' when git push fails."""
         repo = tmp_path / "repo"
         repo.mkdir()
-        # Init a real git repo so git commands work
-        subprocess.run(["git", "init", str(repo)], capture_output=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@test.com"], capture_output=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], capture_output=True)
-
-        # Create a preference so there's something to export
-        pref = Preference(
-            id=generate_id("pref"), path="test.path", parent_id=None, name="test",
-            type="variant"
-        )
-        src_mgr.preferences.save_preference(pref)
-
+        _init_git_repo(repo)
+        src_mgr.preferences.save_preference(_make_pref())
         runner = SyncRunner(src_mgr, str(repo))
         result = runner.push()
         # git push will fail (no remote) — should return "committed", not raise
         assert result["status"] in ("pushed", "committed")
         assert result["counts"]["preferences"] == 1
-        # JSONL file should exist in repo
         assert (repo / "all_preferences.jsonl").exists()
 
     def test_pull_imports_after_git_pull_fails(self, src_mgr, dst_mgr, tmp_path):
         """pull() still imports local JSONL even when git pull fails."""
         repo = tmp_path / "repo"
         repo.mkdir()
-        subprocess.run(["git", "init", str(repo)], capture_output=True)
-
-        # Export some data to repo first
-        pref = Preference(
-            id=generate_id("pref"), path="test.path", parent_id=None, name="test",
-            type="variant"
-        )
-        src_mgr.preferences.save_preference(pref)
+        _init_git_repo(repo)
+        src_mgr.preferences.save_preference(_make_pref())
         PreferenceSync.export(src_mgr, repo)
-
-        # Pull into dst_mgr — git pull will fail (no remote), but import should still work
+        # Pull into dst_mgr — git pull will fail (no remote), import should still run
         runner = SyncRunner(dst_mgr, str(repo))
         result = runner.pull()
-        assert "git_pull_error" in result  # git pull failed
-        assert result["counts"]["preferences"] == 1  # but import succeeded
+        assert "git_pull_error" in result
+        assert result["counts"]["preferences"] == 1
 
     def test_status_returns_string_when_repo_missing(self, src_mgr, tmp_path):
         """status() returns a descriptive string (not raises) when repo doesn't exist."""
