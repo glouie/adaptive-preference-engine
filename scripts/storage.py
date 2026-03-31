@@ -1,299 +1,465 @@
 """
-storage.py - JSONL file storage and retrieval for preferences, associations, signals
+storage.py - SQLite storage for preferences, associations, signals, contexts.
+
+Database lives at <base_dir>/preferences/adaptive.db (single file).
+All nested objects (LearningData, context preferences, signal lists) are
+stored as JSON TEXT blobs so callers never deal with join queries.
 """
 
 import json
 import os
+import shutil
+import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Optional, Any
-from datetime import datetime
-from scripts.models import Preference, Association, ContextStack, Signal
+from typing import Any, Dict, List, Optional
+
+from scripts.models import (
+    Association, AssociationLearning, ContextStack,
+    LearningData, Preference, Signal,
+)
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS preferences (
+    id              TEXT PRIMARY KEY,
+    path            TEXT NOT NULL,
+    parent_id       TEXT,
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL,
+    value           TEXT,
+    confidence      REAL    DEFAULT 0.5,
+    description     TEXT    DEFAULT '',
+    created         TEXT    NOT NULL,
+    last_updated    TEXT    NOT NULL,
+    auto_detected   INTEGER DEFAULT 0,
+    learning        TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pref_path   ON preferences(path);
+CREATE INDEX IF NOT EXISTS idx_pref_parent ON preferences(parent_id);
+
+CREATE TABLE IF NOT EXISTS associations (
+    id                  TEXT PRIMARY KEY,
+    from_id             TEXT NOT NULL,
+    to_id               TEXT NOT NULL,
+    bidirectional       INTEGER DEFAULT 1,
+    strength_forward    REAL    DEFAULT 0.5,
+    strength_backward   REAL    DEFAULT 0.5,
+    learning_forward    TEXT    NOT NULL,
+    learning_backward   TEXT    NOT NULL,
+    description         TEXT    DEFAULT '',
+    context_tags        TEXT    NOT NULL,
+    created             TEXT    NOT NULL,
+    time_decay_factor   REAL    DEFAULT 0.98,
+    last_decay_applied  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assoc_from ON associations(from_id);
+CREATE INDEX IF NOT EXISTS idx_assoc_to   ON associations(to_id);
+
+CREATE TABLE IF NOT EXISTS contexts (
+    id          TEXT PRIMARY KEY,
+    name        TEXT    NOT NULL,
+    scope       TEXT    NOT NULL,
+    active      INTEGER DEFAULT 1,
+    preferences TEXT    NOT NULL,
+    stack_level INTEGER DEFAULT 0,
+    created     TEXT    NOT NULL,
+    last_used   TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ctx_scope  ON contexts(scope);
+CREATE INDEX IF NOT EXISTS idx_ctx_active ON contexts(active);
+
+CREATE TABLE IF NOT EXISTS signals (
+    id                    TEXT PRIMARY KEY,
+    timestamp             TEXT NOT NULL,
+    type                  TEXT NOT NULL,
+    task                  TEXT,
+    context_tags          TEXT NOT NULL,
+    agent_proposed        TEXT,
+    user_corrected_to     TEXT,
+    user_response         TEXT,
+    emotional_tone        TEXT,
+    emotional_indicators  TEXT NOT NULL,
+    preferences_used      TEXT NOT NULL,
+    associations_affected TEXT NOT NULL,
+    preferences_affected  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sig_timestamp ON signals(timestamp);
+CREATE INDEX IF NOT EXISTS idx_sig_type      ON signals(type);
+"""
 
 
-class JSONLStorage:
-    """Base class for JSONL file operations"""
-    
-    def __init__(self, filepath: str):
-        self.filepath = Path(filepath)
-        self.filepath.parent.mkdir(parents=True, exist_ok=True)
-    
-    def append(self, obj: Dict[str, Any]) -> None:
-        """Append JSON object as new line"""
-        with open(self.filepath, 'a') as f:
-            f.write(json.dumps(obj) + '\n')
-    
-    def read_all(self) -> List[Dict[str, Any]]:
-        """Read all lines from JSONL file"""
-        if not self.filepath.exists():
-            return []
-        
-        data = []
-        with open(self.filepath, 'r') as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        data.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-        return data
-    
-    def read_filtered(self, filter_fn) -> List[Dict[str, Any]]:
-        """Read lines matching filter function"""
-        return [obj for obj in self.read_all() if filter_fn(obj)]
-    
-    def find_by_id(self, obj_id: str) -> Optional[Dict[str, Any]]:
-        """Find object by ID"""
-        data = self.read_all()
-        return next((obj for obj in data if obj.get("id") == obj_id), None)
-    
-    def update_by_id(self, obj_id: str, updated_obj: Dict[str, Any]) -> bool:
-        """Update object by ID (rewrites entire file)"""
-        data = self.read_all()
-        
-        found = False
-        for i, obj in enumerate(data):
-            if obj.get("id") == obj_id:
-                data[i] = updated_obj
-                found = True
-                break
-        
-        if found:
-            self._rewrite_all(data)
-        
-        return found
-    
-    def _rewrite_all(self, data: List[Dict[str, Any]]) -> None:
-        """Rewrite entire file (used for updates)"""
-        self.filepath.unlink(missing_ok=True)
-        for obj in data:
-            self.append(obj)
-    
-    def clear(self) -> None:
-        """Clear the file"""
-        self.filepath.unlink(missing_ok=True)
+class SQLiteDB:
+    """
+    Base class: opens (or creates) the shared SQLite database and applies
+    the schema. Each subclass gets a reference to the same connection.
+
+    WAL mode is enabled once at open time so reads and writes don't block
+    each other — important when the CLI and background processors run
+    concurrently.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(_SCHEMA)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.commit()
 
 
-class PreferenceStorage(JSONLStorage):
-    """Manage preference JSONL files"""
-    
+class PreferenceStorage(SQLiteDB):
+    """CRUD for the `preferences` table."""
+
     def save_preference(self, preference: Preference) -> None:
-        """Save or update preference"""
-        existing = self.find_by_id(preference.id)
-        if existing:
-            self.update_by_id(preference.id, preference.to_dict())
-        else:
-            self.append(preference.to_dict())
-    
+        d = preference.to_dict()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO preferences
+                    (id, path, parent_id, name, type, value, confidence,
+                     description, created, last_updated, auto_detected, learning)
+                VALUES
+                    (:id, :path, :parent_id, :name, :type, :value, :confidence,
+                     :description, :created, :last_updated, :auto_detected, :learning)
+                ON CONFLICT(id) DO UPDATE SET
+                    path           = excluded.path,
+                    parent_id      = excluded.parent_id,
+                    name           = excluded.name,
+                    type           = excluded.type,
+                    value          = excluded.value,
+                    confidence     = excluded.confidence,
+                    description    = excluded.description,
+                    last_updated   = excluded.last_updated,
+                    auto_detected  = excluded.auto_detected,
+                    learning       = excluded.learning
+                """,
+                {**d, "learning": json.dumps(d["learning"]),
+                 "auto_detected": int(d["auto_detected"])},
+            )
+
     def get_preference(self, pref_id: str) -> Optional[Preference]:
-        """Get preference by ID"""
-        data = self.find_by_id(pref_id)
-        return Preference.from_dict(data) if data else None
-    
+        row = self._conn.execute(
+            "SELECT * FROM preferences WHERE id = ?", (pref_id,)
+        ).fetchone()
+        return self._row_to_preference(row) if row else None
+
     def get_preferences_for_parent(self, parent_id: str) -> List[Preference]:
-        """Get all preferences under a parent"""
-        data = self.read_filtered(lambda obj: obj.get("parent_id") == parent_id)
-        return [Preference.from_dict(obj) for obj in data]
-    
+        rows = self._conn.execute(
+            "SELECT * FROM preferences WHERE parent_id = ?", (parent_id,)
+        ).fetchall()
+        return [self._row_to_preference(r) for r in rows]
+
     def get_preferences_by_path(self, path_prefix: str) -> List[Preference]:
-        """Get preferences by path prefix (e.g., 'communication.output_format')"""
-        data = self.read_filtered(lambda obj: obj.get("path", "").startswith(path_prefix))
-        return [Preference.from_dict(obj) for obj in data]
-    
+        rows = self._conn.execute(
+            "SELECT * FROM preferences WHERE path LIKE ?",
+            (path_prefix + "%",),
+        ).fetchall()
+        return [self._row_to_preference(r) for r in rows]
+
     def get_all_preferences(self) -> List[Preference]:
-        """Get all preferences"""
-        data = self.read_all()
-        return [Preference.from_dict(obj) for obj in data]
+        rows = self._conn.execute("SELECT * FROM preferences").fetchall()
+        return [self._row_to_preference(r) for r in rows]
+
+    @staticmethod
+    def _row_to_preference(row: sqlite3.Row) -> Preference:
+        d = dict(row)
+        d["learning"] = json.loads(d["learning"])
+        d["auto_detected"] = bool(d["auto_detected"])
+        return Preference.from_dict(d)
 
 
-class AssociationStorage(JSONLStorage):
-    """Manage association JSONL file"""
-    
+class AssociationStorage(SQLiteDB):
+    """CRUD for the `associations` table."""
+
     def save_association(self, association: Association) -> None:
-        """Save or update association"""
-        existing = self.find_by_id(association.id)
-        if existing:
-            self.update_by_id(association.id, association.to_dict())
-        else:
-            self.append(association.to_dict())
-    
+        d = association.to_dict()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO associations
+                    (id, from_id, to_id, bidirectional, strength_forward,
+                     strength_backward, learning_forward, learning_backward,
+                     description, context_tags, created, time_decay_factor,
+                     last_decay_applied)
+                VALUES
+                    (:id, :from_id, :to_id, :bidirectional, :strength_forward,
+                     :strength_backward, :learning_forward, :learning_backward,
+                     :description, :context_tags, :created, :time_decay_factor,
+                     :last_decay_applied)
+                ON CONFLICT(id) DO UPDATE SET
+                    from_id            = excluded.from_id,
+                    to_id              = excluded.to_id,
+                    bidirectional      = excluded.bidirectional,
+                    strength_forward   = excluded.strength_forward,
+                    strength_backward  = excluded.strength_backward,
+                    learning_forward   = excluded.learning_forward,
+                    learning_backward  = excluded.learning_backward,
+                    description        = excluded.description,
+                    context_tags       = excluded.context_tags,
+                    time_decay_factor  = excluded.time_decay_factor,
+                    last_decay_applied = excluded.last_decay_applied
+                """,
+                {
+                    **d,
+                    "bidirectional": int(d["bidirectional"]),
+                    "learning_forward": json.dumps(d["learning_forward"]),
+                    "learning_backward": json.dumps(d["learning_backward"]),
+                    "context_tags": json.dumps(d["context_tags"]),
+                },
+            )
+
     def get_association(self, assoc_id: str) -> Optional[Association]:
-        """Get association by ID"""
-        data = self.find_by_id(assoc_id)
-        return Association.from_dict(data) if data else None
-    
+        row = self._conn.execute(
+            "SELECT * FROM associations WHERE id = ?", (assoc_id,)
+        ).fetchone()
+        return self._row_to_association(row) if row else None
+
     def get_associations_for_preference(self, pref_id: str) -> List[Association]:
-        """Get all associations involving this preference (either direction)"""
-        data = self.read_filtered(
-            lambda obj: obj.get("from_id") == pref_id or obj.get("to_id") == pref_id
-        )
-        return [Association.from_dict(obj) for obj in data]
-    
+        rows = self._conn.execute(
+            "SELECT * FROM associations WHERE from_id = ? OR to_id = ?",
+            (pref_id, pref_id),
+        ).fetchall()
+        return [self._row_to_association(r) for r in rows]
+
     def get_associations_from(self, from_id: str) -> List[Association]:
-        """Get associations where this is the source"""
-        data = self.read_filtered(lambda obj: obj.get("from_id") == from_id)
-        return [Association.from_dict(obj) for obj in data]
-    
+        rows = self._conn.execute(
+            "SELECT * FROM associations WHERE from_id = ?", (from_id,)
+        ).fetchall()
+        return [self._row_to_association(r) for r in rows]
+
     def get_associations_to(self, to_id: str) -> List[Association]:
-        """Get associations where this is the target"""
-        data = self.read_filtered(lambda obj: obj.get("to_id") == to_id)
-        return [Association.from_dict(obj) for obj in data]
-    
+        rows = self._conn.execute(
+            "SELECT * FROM associations WHERE to_id = ?", (to_id,)
+        ).fetchall()
+        return [self._row_to_association(r) for r in rows]
+
     def get_all_associations(self) -> List[Association]:
-        """Get all associations"""
-        data = self.read_all()
-        return [Association.from_dict(obj) for obj in data]
+        rows = self._conn.execute("SELECT * FROM associations").fetchall()
+        return [self._row_to_association(r) for r in rows]
+
+    @staticmethod
+    def _row_to_association(row: sqlite3.Row) -> Association:
+        d = dict(row)
+        d["bidirectional"] = bool(d["bidirectional"])
+        d["learning_forward"] = json.loads(d["learning_forward"])
+        d["learning_backward"] = json.loads(d["learning_backward"])
+        d["context_tags"] = json.loads(d["context_tags"])
+        return Association.from_dict(d)
 
 
-class ContextStorage(JSONLStorage):
-    """Manage context stack JSONL file"""
-    
+class ContextStorage(SQLiteDB):
+    """CRUD for the `contexts` table."""
+
     def save_context(self, context: ContextStack) -> None:
-        """Save or update context"""
-        existing = self.find_by_id(context.id)
-        if existing:
-            self.update_by_id(context.id, context.to_dict())
-        else:
-            self.append(context.to_dict())
-    
-    def get_context(self, context_id: str) -> Optional[ContextStack]:
-        """Get context by ID"""
-        data = self.find_by_id(context_id)
-        return ContextStack.from_dict(data) if data else None
-    
-    def get_contexts_by_scope(self, scope: str) -> List[ContextStack]:
-        """Get all contexts for a scope (base, project, conversation)"""
-        data = self.read_filtered(lambda obj: obj.get("scope") == scope)
-        return [ContextStack.from_dict(obj) for obj in data]
-    
+        d = context.to_dict()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO contexts
+                    (id, name, scope, active, preferences, stack_level,
+                     created, last_used)
+                VALUES
+                    (:id, :name, :scope, :active, :preferences, :stack_level,
+                     :created, :last_used)
+                ON CONFLICT(id) DO UPDATE SET
+                    name        = excluded.name,
+                    scope       = excluded.scope,
+                    active      = excluded.active,
+                    preferences = excluded.preferences,
+                    stack_level = excluded.stack_level,
+                    last_used   = excluded.last_used
+                """,
+                {
+                    **d,
+                    "active": int(d["active"]),
+                    "preferences": json.dumps(d["preferences"]),
+                },
+            )
+
+    def get_context(self, ctx_id: str) -> Optional[ContextStack]:
+        row = self._conn.execute(
+            "SELECT * FROM contexts WHERE id = ?", (ctx_id,)
+        ).fetchone()
+        return self._row_to_context(row) if row else None
+
     def get_active_contexts(self) -> List[ContextStack]:
-        """Get all active contexts"""
-        data = self.read_filtered(lambda obj: obj.get("active") is True)
-        contexts = [ContextStack.from_dict(obj) for obj in data]
-        # Sort by stack level (0, 1, 2)
-        return sorted(contexts, key=lambda c: c.stack_level)
-    
+        rows = self._conn.execute(
+            "SELECT * FROM contexts WHERE active = 1 ORDER BY stack_level ASC"
+        ).fetchall()
+        return [self._row_to_context(r) for r in rows]
+
+    def get_contexts_by_scope(self, scope: str) -> List[ContextStack]:
+        rows = self._conn.execute(
+            "SELECT * FROM contexts WHERE scope = ?", (scope,)
+        ).fetchall()
+        return [self._row_to_context(r) for r in rows]
+
     def get_all_contexts(self) -> List[ContextStack]:
-        """Get all contexts"""
-        data = self.read_all()
-        return [ContextStack.from_dict(obj) for obj in data]
+        rows = self._conn.execute("SELECT * FROM contexts").fetchall()
+        return [self._row_to_context(r) for r in rows]
+
+    @staticmethod
+    def _row_to_context(row: sqlite3.Row) -> ContextStack:
+        d = dict(row)
+        d["active"] = bool(d["active"])
+        d["preferences"] = json.loads(d["preferences"])
+        return ContextStack.from_dict(d)
 
 
-class SignalStorage(JSONLStorage):
-    """Manage behavioral signal JSONL file"""
-    
+class SignalStorage(SQLiteDB):
+    """CRUD for the `signals` table."""
+
     def save_signal(self, signal: Signal) -> None:
-        """Save new signal (append only)"""
-        self.append(signal.to_dict())
-    
+        d = signal.to_dict()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO signals
+                    (id, timestamp, type, task, context_tags, agent_proposed,
+                     user_corrected_to, user_response, emotional_tone,
+                     emotional_indicators, preferences_used,
+                     associations_affected, preferences_affected)
+                VALUES
+                    (:id, :timestamp, :type, :task, :context_tags, :agent_proposed,
+                     :user_corrected_to, :user_response, :emotional_tone,
+                     :emotional_indicators, :preferences_used,
+                     :associations_affected, :preferences_affected)
+                ON CONFLICT(id) DO UPDATE SET
+                    timestamp            = excluded.timestamp,
+                    type                 = excluded.type,
+                    task                 = excluded.task,
+                    context_tags         = excluded.context_tags,
+                    agent_proposed       = excluded.agent_proposed,
+                    user_corrected_to    = excluded.user_corrected_to,
+                    user_response        = excluded.user_response,
+                    emotional_tone       = excluded.emotional_tone,
+                    emotional_indicators = excluded.emotional_indicators,
+                    preferences_used     = excluded.preferences_used,
+                    associations_affected = excluded.associations_affected,
+                    preferences_affected = excluded.preferences_affected
+                """,
+                {
+                    **d,
+                    "context_tags": json.dumps(d["context_tags"]),
+                    "emotional_indicators": json.dumps(d["emotional_indicators"]),
+                    "preferences_used": json.dumps(d["preferences_used"]),
+                    "associations_affected": json.dumps(d["associations_affected"]),
+                    "preferences_affected": json.dumps(d["preferences_affected"]),
+                },
+            )
+
     def get_signal(self, signal_id: str) -> Optional[Signal]:
-        """Get signal by ID"""
-        data = self.find_by_id(signal_id)
-        return Signal.from_dict(data) if data else None
-    
+        row = self._conn.execute(
+            "SELECT * FROM signals WHERE id = ?", (signal_id,)
+        ).fetchone()
+        return self._row_to_signal(row) if row else None
+
     def get_signals_by_type(self, signal_type: str) -> List[Signal]:
-        """Get signals by type (correction, feedback, usage, etc.)"""
-        data = self.read_filtered(lambda obj: obj.get("type") == signal_type)
-        return [Signal.from_dict(obj) for obj in data]
-    
-    def get_signals_for_preference(self, pref_id: str) -> List[Signal]:
-        """Get signals affecting a specific preference"""
-        data = self.read_filtered(
-            lambda obj: pref_id in obj.get("preferences_used", [])
-        )
-        return [Signal.from_dict(obj) for obj in data]
-    
+        rows = self._conn.execute(
+            "SELECT * FROM signals WHERE type = ?", (signal_type,)
+        ).fetchall()
+        return [self._row_to_signal(r) for r in rows]
+
     def get_recent_signals(self, hours: int = 24) -> List[Signal]:
-        """Get signals from last N hours"""
-        from datetime import datetime, timedelta
-        
-        cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
-        data = self.read_filtered(lambda obj: obj.get("timestamp", "") >= cutoff)
-        return [Signal.from_dict(obj) for obj in data]
-    
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).isoformat()
+        rows = self._conn.execute(
+            "SELECT * FROM signals WHERE timestamp >= ? ORDER BY timestamp DESC",
+            (cutoff,),
+        ).fetchall()
+        return [self._row_to_signal(r) for r in rows]
+
+    def get_signals_for_preference(self, pref_id: str) -> List[Signal]:
+        rows = self._conn.execute(
+            """
+            SELECT s.* FROM signals s, json_each(s.preferences_used) j
+            WHERE j.value = ?
+            """,
+            (pref_id,),
+        ).fetchall()
+        return [self._row_to_signal(r) for r in rows]
+
     def get_all_signals(self) -> List[Signal]:
-        """Get all signals"""
-        data = self.read_all()
-        return [Signal.from_dict(obj) for obj in data]
+        rows = self._conn.execute("SELECT * FROM signals").fetchall()
+        return [self._row_to_signal(r) for r in rows]
+
+    @staticmethod
+    def _row_to_signal(row: sqlite3.Row) -> Signal:
+        d = dict(row)
+        d["context_tags"] = json.loads(d["context_tags"])
+        d["emotional_indicators"] = json.loads(d["emotional_indicators"])
+        d["preferences_used"] = json.loads(d["preferences_used"])
+        d["associations_affected"] = json.loads(d["associations_affected"])
+        d["preferences_affected"] = json.loads(d["preferences_affected"])
+        return Signal.from_dict(d)
 
 
 class PreferenceStorageManager:
-    """High-level manager for all preference storage"""
-    
-    def __init__(self, base_dir: str = None):
-        """Initialize storage manager"""
+    """
+    Facade that owns the single SQLite connection and exposes typed
+    sub-managers for each entity (preferences, associations, contexts,
+    signals).  All sub-managers share the same on-disk database.
+    """
+
+    def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
             base_dir = os.path.expanduser("~/.adaptive-cli")
-        
         self.base_dir = Path(base_dir)
-        self.preferences_dir = self.base_dir / "preferences"
-        self.preferences_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize storage for different file types
-        self.preferences = PreferenceStorage(str(self.preferences_dir / "all_preferences.jsonl"))
-        self.associations = AssociationStorage(str(self.preferences_dir / "associations.jsonl"))
-        self.contexts = ContextStorage(str(self.preferences_dir / "contexts.jsonl"))
-        self.signals = SignalStorage(str(self.preferences_dir / "signals.jsonl"))
-    
+        db_path = self.base_dir / "preferences" / "adaptive.db"
+        self.preferences  = PreferenceStorage(db_path)
+        self.associations = AssociationStorage(db_path)
+        self.contexts     = ContextStorage(db_path)
+        self.signals      = SignalStorage(db_path)
+
     def get_storage_info(self) -> Dict[str, Any]:
-        """Get storage statistics"""
+        conn = self.preferences._conn
         return {
-            "base_dir": str(self.base_dir),
-            "preferences_count": len(self.preferences.get_all_preferences()),
-            "associations_count": len(self.associations.get_all_associations()),
-            "contexts_count": len(self.contexts.get_all_contexts()),
-            "signals_count": len(self.signals.get_all_signals())
+            "db_path": str(self.preferences.db_path),
+            "preferences_count": conn.execute(
+                "SELECT COUNT(*) FROM preferences"
+            ).fetchone()[0],
+            "associations_count": conn.execute(
+                "SELECT COUNT(*) FROM associations"
+            ).fetchone()[0],
+            "contexts_count": conn.execute(
+                "SELECT COUNT(*) FROM contexts"
+            ).fetchone()[0],
+            "signals_count": conn.execute(
+                "SELECT COUNT(*) FROM signals"
+            ).fetchone()[0],
         }
-    
-    def backup(self, backup_name: str = None) -> str:
-        """Create timestamped backup of all preference files"""
+
+    def backup(self, backup_name: Optional[str] = None) -> str:
+        """Back up the live database using SQLite's online backup API."""
         if backup_name is None:
             backup_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
         backup_dir = self.base_dir / "backups" / backup_name
         backup_dir.mkdir(parents=True, exist_ok=True)
-        
-        import shutil
-        for file in self.preferences_dir.glob("*.jsonl"):
-            shutil.copy(file, backup_dir / file.name)
-        
+        backup_path = backup_dir / "adaptive.db"
+        src_conn = self.preferences._conn
+        dst_conn = sqlite3.connect(str(backup_path))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
         return str(backup_dir)
-    
-    def reset(self, confirm: bool = True) -> None:
-        """Reset all preferences (with backup)"""
-        if confirm:
-            response = input("⚠️  Clear all preferences? This will back up old data. (y/n): ")
-            if response.lower() != 'y':
-                return
-        
-        self.backup(f"reset_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        
-        self.preferences.clear()
-        self.associations.clear()
-        self.contexts.clear()
-        self.signals.clear()
-        
-        print("✅ Preferences reset. Backup created.")
 
+    def prune_old_signals(self, max_age_days: int = 90) -> int:
+        """Delete signals older than *max_age_days*. Returns count removed."""
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+        conn = self.preferences._conn
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM signals WHERE timestamp < ?", (cutoff,)
+            )
+        return cursor.rowcount
 
-if __name__ == "__main__":
-    # Quick test
-    mgr = PreferenceStorageManager("/tmp/test_adaptive_cli")
-    
-    # Create test preference
-    pref = Preference(
-        id="comm_bullets",
-        path="communication.output_format.bullets",
-        parent_id="comm_format",
-        name="bullets",
-        type="variant",
-        value="active",
-        confidence=0.85
-    )
-    
-    mgr.preferences.save_preference(pref)
-    
-    # Retrieve it
-    retrieved = mgr.preferences.get_preference("comm_bullets")
-    print(f"Saved and retrieved: {retrieved.name}")
-    
-    print("\nStorage info:", mgr.get_storage_info())
+    def reset(self) -> None:
+        """Wipe all rows from every table (schema stays intact)."""
+        conn = self.preferences._conn
+        with conn:
+            for table in ("preferences", "associations", "contexts", "signals"):
+                conn.execute(f"DELETE FROM {table}")

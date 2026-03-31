@@ -7,9 +7,10 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Add scripts to path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.models import (
     Preference, Association, AssociationLearning, ContextStack,
@@ -18,14 +19,16 @@ from scripts.models import (
 from scripts.storage import PreferenceStorageManager
 from scripts.preference_loader import PreferenceLoader
 from scripts.signal_processor import SignalProcessor, StrengthCalculator
+from scripts.config import AdaptiveConfig
+from scripts.sync import SyncRunner
 
 
 class AdaptivePreferenceCLI:
     """CLI interface for preference engine"""
     
-    def __init__(self, base_dir: str = None):
+    def __init__(self, base_dir: Optional[str] = None):
         if base_dir is None:
-            base_dir = Path.home() / ".adaptive-cli"
+            base_dir = str(Path.home() / ".adaptive-cli")
         
         self.storage = PreferenceStorageManager(str(base_dir))
         self.loader = PreferenceLoader(self.storage)
@@ -308,9 +311,9 @@ class AdaptivePreferenceCLI:
     def cmd_show_stats(self, args):
         """Show storage statistics"""
         info = self.storage.get_storage_info()
-        
+
         print(f"\n📊 Storage Statistics")
-        print(f"   Base Dir: {info['base_dir']}")
+        print(f"   DB Path: {info['db_path']}")
         print(f"   Preferences: {info['preferences_count']}")
         print(f"   Associations: {info['associations_count']}")
         print(f"   Contexts: {info['contexts_count']}")
@@ -318,7 +321,79 @@ class AdaptivePreferenceCLI:
     
     def cmd_reset(self, args):
         """Reset all preferences"""
-        self.storage.reset(confirm=True)
+        self.storage.reset()
+
+    def cmd_sync_configure(self, args):
+        """Set the sync repo path."""
+        cfg = AdaptiveConfig(str(self.storage.base_dir))
+        repo = Path(args.repo_path).expanduser()
+        if not repo.exists():
+            print(f"❌ Path does not exist: {repo}")
+            print("⚠️  Create the directory or clone your preferences repo first.")
+            return
+        cfg.sync_repo_path = str(repo)
+        print(f"✅ Sync repo set to: {repo}")
+        print(f"   Use 'adaptive-cli sync push' to upload preferences.")
+        print(f"   Use 'adaptive-cli sync pull' to download on another machine.")
+
+    def cmd_sync_push(self, args):
+        """Export SQLite → JSONL and push to git remote."""
+        cfg = AdaptiveConfig(str(self.storage.base_dir))
+        if not cfg.sync_repo_path:
+            print("❌ No sync repo configured.")
+            print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
+            return
+        runner = SyncRunner(self.storage, cfg.sync_repo_path)
+        result = runner.push()
+        if result["status"] == "up-to-date":
+            print("⚠️  Nothing to push — preferences are already up to date.")
+        else:
+            c = result["counts"]
+            if result["status"] == "pushed":
+                print("✅ Preferences pushed to sync repo.")
+            else:
+                print("✅ Preferences exported and committed (no remote configured).")
+            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                  f"{c['contexts']} contexts, {c['signals']} signals")
+            if result.get("git_push_error"):
+                print(f"⚠️  git push failed: {result['git_push_error']}")
+
+    def cmd_sync_pull(self, args):
+        """Pull from git remote and import JSONL → SQLite."""
+        cfg = AdaptiveConfig(str(self.storage.base_dir))
+        if not cfg.sync_repo_path:
+            print("❌ No sync repo configured.")
+            print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
+            return
+        runner = SyncRunner(self.storage, cfg.sync_repo_path)
+        result = runner.pull()
+        c = result["counts"]
+        if result.get("git_pull_error"):
+            print(f"❌ git pull failed: {result['git_pull_error']}")
+            print("⚠️  Importing from local (possibly stale) repo state.")
+            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                  f"{c['contexts']} contexts, {c['signals']} signals imported from local state")
+        else:
+            print("✅ Preferences pulled from sync repo.")
+            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                  f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
+
+    def cmd_sync_status(self, args):
+        """Show sync repo git status."""
+        cfg = AdaptiveConfig(str(self.storage.base_dir))
+        if not cfg.sync_repo_path:
+            print("⚠️  No sync repo configured.")
+            print("   Run: adaptive-cli sync configure --repo-path <path>")
+            return
+        runner = SyncRunner(self.storage, cfg.sync_repo_path)
+        print("\n🔄 Sync Status")
+        print(f"   Repo: {cfg.sync_repo_path}")
+        status = runner.status()
+        if status.strip():
+            print("\n⚠️  Unpushed changes:")
+            print(status)
+        else:
+            print("✅ Sync repo is clean — no pending changes.")
 
 
 def main():
@@ -440,10 +515,28 @@ Examples:
     decay_parser.add_argument("--details", action="store_true")
     
     reset_parser = subparsers.add_parser("reset", help="Reset all preferences")
-    
+
+    # sync
+    sync_parser = subparsers.add_parser("sync", help="Sync preferences with a git repo")
+    sync_sub = sync_parser.add_subparsers(dest="sync_subcommand")
+
+    sync_cfg = sync_sub.add_parser("configure", help="Set the sync repo path")
+    sync_cfg.add_argument("--repo-path", required=True,
+                          help="Path to the git repo directory containing JSONL exports")
+
+    sync_sub.add_parser("push", help="Export to JSONL and push to remote")
+    sync_sub.add_parser("pull", help="Pull from remote and import into local SQLite")
+    sync_sub.add_parser("status", help="Show sync repo git status")
+
+    parser.add_argument(
+        "--base-dir",
+        default=None,
+        help="Override base directory for storage (default: ~/.adaptive-cli)"
+    )
+
     args = parser.parse_args()
-    
-    cli = AdaptivePreferenceCLI()
+
+    cli = AdaptivePreferenceCLI(base_dir=args.base_dir)
     
     # Route commands
     try:
@@ -492,7 +585,19 @@ Examples:
         
         elif args.command == "reset":
             cli.cmd_reset(args)
-        
+
+        elif args.command == "sync":
+            if args.sync_subcommand == "configure":
+                cli.cmd_sync_configure(args)
+            elif args.sync_subcommand == "push":
+                cli.cmd_sync_push(args)
+            elif args.sync_subcommand == "pull":
+                cli.cmd_sync_pull(args)
+            elif args.sync_subcommand == "status":
+                cli.cmd_sync_status(args)
+            else:
+                sync_parser.print_help()
+
         else:
             parser.print_help()
     
