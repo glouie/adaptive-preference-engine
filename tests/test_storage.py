@@ -124,6 +124,16 @@ class TestPreferenceStorage:
         results = mgr.preferences.get_preferences_for_parent("parent_x")
         assert len(results) == 2
 
+    def test_get_by_path_prefix_like_collision(self, mgr):
+        """Test that LIKE prefix collision is avoided. 'comm' should not match 'communication'."""
+        mgr.preferences.save_preference(make_pref(id="p1", path="comm.output"))
+        mgr.preferences.save_preference(make_pref(id="p2", path="communication.tone"))
+        # Query for "comm" should only return p1 (exact prefix or prefix with dot)
+        results = mgr.preferences.get_preferences_by_path("comm")
+        assert len(results) == 1
+        assert results[0].id == "p1"
+        assert results[0].path == "comm.output"
+
 
 # ── Association tests ─────────────────────────────────────────────────────────
 
@@ -302,8 +312,10 @@ class TestPreferenceStorageManager:
     def test_reset_clears_all_tables(self, mgr):
         mgr.preferences.save_preference(make_pref())
         mgr.associations.save_association(make_assoc())
+        mgr.contexts.save_context(make_context())
         mgr.signals.save_signal(make_signal())
         mgr.reset()
         assert mgr.preferences.get_all_preferences() == []
         assert mgr.associations.get_all_associations() == []
+        assert mgr.contexts.get_all_contexts() == []
         assert mgr.signals.get_all_signals() == []

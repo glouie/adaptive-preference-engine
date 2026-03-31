@@ -8,15 +8,14 @@ stored as JSON TEXT blobs so callers never deal with join queries.
 
 import json
 import os
-import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from scripts.models import (
-    Association, AssociationLearning, ContextStack,
-    LearningData, Preference, Signal,
+    Association, ContextStack,
+    Preference, Signal,
 )
 
 _SCHEMA = """
@@ -90,23 +89,16 @@ CREATE INDEX IF NOT EXISTS idx_sig_type      ON signals(type);
 
 class SQLiteDB:
     """
-    Base class: opens (or creates) the shared SQLite database and applies
-    the schema. Each subclass gets a reference to the same connection.
+    Base class: holds a reference to a shared SQLite connection.
+    Each subclass gets the same connection passed in from the manager.
 
     WAL mode is enabled once at open time so reads and writes don't block
     each other — important when the CLI and background processors run
     concurrently.
     """
 
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = db_path
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.commit()
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
 
 
 class PreferenceStorage(SQLiteDB):
@@ -153,8 +145,8 @@ class PreferenceStorage(SQLiteDB):
 
     def get_preferences_by_path(self, path_prefix: str) -> List[Preference]:
         rows = self._conn.execute(
-            "SELECT * FROM preferences WHERE path LIKE ?",
-            (path_prefix + "%",),
+            "SELECT * FROM preferences WHERE path = ? OR path LIKE ?",
+            (path_prefix, path_prefix + ".%"),
         ).fetchall()
         return [self._row_to_preference(r) for r in rows]
 
@@ -409,25 +401,32 @@ class PreferenceStorageManager:
             base_dir = os.path.expanduser("~/.adaptive-cli")
         self.base_dir = Path(base_dir)
         db_path = self.base_dir / "preferences" / "adaptive.db"
-        self.preferences  = PreferenceStorage(db_path)
-        self.associations = AssociationStorage(db_path)
-        self.contexts     = ContextStorage(db_path)
-        self.signals      = SignalStorage(db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(_SCHEMA)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.commit()
+        self.db_path = db_path
+        self.preferences  = PreferenceStorage(self._conn)
+        self.associations = AssociationStorage(self._conn)
+        self.contexts     = ContextStorage(self._conn)
+        self.signals      = SignalStorage(self._conn)
 
     def get_storage_info(self) -> Dict[str, Any]:
-        conn = self.preferences._conn
         return {
-            "db_path": str(self.preferences.db_path),
-            "preferences_count": conn.execute(
+            "db_path": str(self.db_path),
+            "preferences_count": self._conn.execute(
                 "SELECT COUNT(*) FROM preferences"
             ).fetchone()[0],
-            "associations_count": conn.execute(
+            "associations_count": self._conn.execute(
                 "SELECT COUNT(*) FROM associations"
             ).fetchone()[0],
-            "contexts_count": conn.execute(
+            "contexts_count": self._conn.execute(
                 "SELECT COUNT(*) FROM contexts"
             ).fetchone()[0],
-            "signals_count": conn.execute(
+            "signals_count": self._conn.execute(
                 "SELECT COUNT(*) FROM signals"
             ).fetchone()[0],
         }
@@ -439,10 +438,9 @@ class PreferenceStorageManager:
         backup_dir = self.base_dir / "backups" / backup_name
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup_path = backup_dir / "adaptive.db"
-        src_conn = self.preferences._conn
         dst_conn = sqlite3.connect(str(backup_path))
         try:
-            src_conn.backup(dst_conn)
+            self._conn.backup(dst_conn)
         finally:
             dst_conn.close()
         return str(backup_dir)
@@ -450,16 +448,14 @@ class PreferenceStorageManager:
     def prune_old_signals(self, max_age_days: int = 90) -> int:
         """Delete signals older than *max_age_days*. Returns count removed."""
         cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
-        conn = self.preferences._conn
-        with conn:
-            cursor = conn.execute(
+        with self._conn:
+            cursor = self._conn.execute(
                 "DELETE FROM signals WHERE timestamp < ?", (cutoff,)
             )
         return cursor.rowcount
 
     def reset(self) -> None:
         """Wipe all rows from every table (schema stays intact)."""
-        conn = self.preferences._conn
-        with conn:
+        with self._conn:
             for table in ("preferences", "associations", "contexts", "signals"):
-                conn.execute(f"DELETE FROM {table}")
+                self._conn.execute(f"DELETE FROM {table}")
