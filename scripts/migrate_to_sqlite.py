@@ -50,7 +50,9 @@ def migrate(base_dir: str, dry_run: bool = False) -> None:
         "signals":      prefs_dir / "signals.jsonl",
     }
 
-    counts = {k: len(_read_jsonl(v)) for k, v in files.items()}
+    # Read each file once; reuse for both counting and migration
+    data = {k: _read_jsonl(v) for k, v in files.items()}
+    counts = {k: len(v) for k, v in data.items()}
     total = sum(counts.values())
 
     if total == 0:
@@ -68,25 +70,25 @@ def migrate(base_dir: str, dry_run: bool = False) -> None:
 
     mgr = PreferenceStorageManager(base_dir)
 
-    for d in _read_jsonl(files["preferences"]):
+    for d in data["preferences"]:
         try:
             mgr.preferences.save_preference(Preference.from_dict(d))
         except Exception as e:
             print(f"  ⚠  preference {d.get('id')}: {e}")
 
-    for d in _read_jsonl(files["associations"]):
+    for d in data["associations"]:
         try:
             mgr.associations.save_association(Association.from_dict(d))
         except Exception as e:
             print(f"  ⚠  association {d.get('id')}: {e}")
 
-    for d in _read_jsonl(files["contexts"]):
+    for d in data["contexts"]:
         try:
             mgr.contexts.save_context(ContextStack.from_dict(d))
         except Exception as e:
             print(f"  ⚠  context {d.get('id')}: {e}")
 
-    for d in _read_jsonl(files["signals"]):
+    for d in data["signals"]:
         try:
             mgr.signals.save_signal(Signal.from_dict(d))
         except Exception as e:

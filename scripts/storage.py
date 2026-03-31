@@ -145,8 +145,8 @@ class PreferenceStorage(SQLiteDB):
 
     def get_preferences_by_path(self, path_prefix: str) -> List[Preference]:
         rows = self._conn.execute(
-            "SELECT * FROM preferences WHERE path LIKE ?",
-            (path_prefix + "%",),
+            "SELECT * FROM preferences WHERE path = ? OR path LIKE ?",
+            (path_prefix, path_prefix + ".%"),
         ).fetchall()
         return [self._row_to_preference(r) for r in rows]
 
