@@ -319,3 +319,20 @@ class TestPreferenceStorageManager:
         assert mgr.associations.get_all_associations() == []
         assert mgr.contexts.get_all_contexts() == []
         assert mgr.signals.get_all_signals() == []
+
+    def test_schema_version_set_on_init(self, mgr):
+        row = mgr._conn.execute("SELECT version FROM schema_version").fetchone()
+        assert row is not None
+        assert row[0] == 1
+
+    def test_context_manager(self, tmp_path):
+        from scripts.storage import PreferenceStorageManager
+        with PreferenceStorageManager(str(tmp_path)) as mgr:
+            assert mgr._conn is not None
+        # After exit, connection should be closed (further queries raise)
+        import sqlite3
+        try:
+            mgr._conn.execute("SELECT 1")
+            assert False, "Expected exception on closed connection"
+        except sqlite3.ProgrammingError:
+            pass  # expected

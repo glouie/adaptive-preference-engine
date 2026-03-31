@@ -61,7 +61,7 @@ class OnboardingState:
 
     def advance_step(self) -> int:
         """Move to next step"""
-        self.state["current_step"] = min(self.state["current_step"] + 1, 7)
+        self.state["current_step"] = self.state["current_step"] + 1
         self._save_state()
         return self.state["current_step"]
 
@@ -205,14 +205,14 @@ Examples of preferences:
   • Tone: "formal", "casual", "technical"
   • Structure: "outline first", "examples first", "summary last"
 
-Quick start: Choose a user profile that matches you:
-  1. DEVELOPER - Code blocks, technical depth, API tables
-  2. ANALYST   - Data tables, CSV, detailed breakdowns
-  3. WRITER    - Prose, long-form, emotional depth
-  4. EXECUTIVE - Bullet summaries, brevity, high-level
-  5. LEARNER   - Step-by-step, examples, gentle tone
+Quick start: Choose a profile that matches you (or use 0 for a demo):
+  0. Demo only  - Create one sample preference manually
+  1. python-developer   - Type hints, pytest, Google docstrings
+  2. technical-writer   - Markdown headers, code examples, thorough
+  3. code-reviewer      - Inline comments, severity labels, correctness-first
+  4. concise-communicator - Short responses, direct tone, minimal bullets
 
-Or skip to create a custom preference.
+You will be asked to enter a number after this screen loads.
 
 For this demo, we'll create:
   Name: output_format
@@ -419,6 +419,10 @@ Summary of what you just set up:
 ✓ Got quick reference card
 
 NEXT STEPS:
+  • See your preferences:    adaptive-cli pref list
+  • Apply a template:        adaptive-cli template apply python-developer
+  • Browse templates:        adaptive-cli template list
+  • Sync across machines:    adaptive-cli sync configure --repo-path <path>
 
 1. Use the system normally
    • Make requests to AI agents
@@ -547,14 +551,15 @@ Happy learning! The system will improve with every interaction. 🚀
         template_manager = PreferenceTemplateManager()
         templates = template_manager.list_templates()
 
-        print("\nChoose how to start:")
-        print("  0. Demo preference only")
+        print("\nChoose how to start (type a number and press Enter):")
+        print("  0. Demo preference only  [default]")
         for index, template in enumerate(templates, start=1):
-            print(f"  {index}. {template['key']:10s} - {template['name']}")
+            print(f"  {index}. {template['key']:25s} - {template['name']}")
         print("  q. Quit onboarding")
+        print()
 
         while True:
-            choice = input("Select an option [0]: ").strip().lower()
+            choice = input("Enter your choice [0]: ").strip().lower()
             if choice == "":
                 return None
             if choice == "q":
@@ -842,7 +847,11 @@ Happy learning! The system will improve with every interaction. 🚀
 
         self.mark_complete()
         print("\n✅ Onboarding complete! Welcome to the Adaptive Preference Engine!")
-        print("   Type 'adaptive-cli pref list' to see your learned preferences.\n")
+        print("\nNext steps:")
+        print("  • See your preferences:    adaptive-cli pref list")
+        print("  • Apply a template:        adaptive-cli template apply python-developer")
+        print("  • Browse templates:        adaptive-cli template list")
+        print("  • Sync across machines:    adaptive-cli sync configure --repo-path <path>\n")
         return True
 
     def _create_demo_preference(self) -> str:
@@ -923,7 +932,7 @@ Happy learning! The system will improve with every interaction. 🚀
         for template in templates:
             output += f"  {template['key']:10s} - {template['name']:10s}\n"
             output += f"    {template['description']}\n"
-            output += f"    ({template['preference_count']} preferences)\n\n"
+            output += f"    ({template['count']} preferences)\n\n"
 
         output += "You can apply any of these templates to get started,\nor create a custom preference from scratch.\n"
         print(output)
@@ -1006,6 +1015,12 @@ Press 'adaptive-cli pref list' to see live version!
         else:
             digest += "  (none - you're on a roll!)\n"
 
+        # Friction metrics section
+        friction_section = self._load_friction_summary()
+        if friction_section:
+            digest += f"\n{BOLD}FRICTION SUMMARY:{RESET}\n"
+            digest += friction_section
+
         digest += f"""
 {BOLD}INSIGHTS:{RESET}
   • Keep correcting - patterns solidify at 7+ corrections
@@ -1016,6 +1031,44 @@ Keep up the good work! 🚀
 """
 
         return digest
+
+    def _load_friction_summary(self) -> str:
+        """Load friction metrics from ~/.adaptive-cli/metrics.jsonl.
+
+        Returns a formatted string summary if friction data exists, or empty
+        string when the file is missing or contains no friction events.
+        """
+        metrics_file = self.base_dir / "metrics.jsonl"
+        if not metrics_file.exists():
+            return ""
+
+        friction_events: List[Dict] = []
+        try:
+            with open(metrics_file) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    if entry.get("type") == "friction" or "friction" in entry:
+                        friction_events.append(entry)
+        except (OSError, json.JSONDecodeError):
+            return ""
+
+        if not friction_events:
+            return ""
+
+        # Count friction by category
+        category_counts: Dict[str, int] = {}
+        for event in friction_events:
+            category = event.get("category") or event.get("context") or "general"
+            category_counts[category] = category_counts.get(category, 0) + 1
+
+        total = sum(category_counts.values())
+        lines = [f"  Total friction events: {total}\n"]
+        for cat, count in sorted(category_counts.items(), key=lambda x: -x[1])[:5]:
+            lines.append(f"  • {cat}: {count}\n")
+        return "".join(lines)
 
 
 def check_first_run_and_onboard(base_dir: str = None, skip_onboarding: bool = False) -> bool:
