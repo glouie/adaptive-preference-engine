@@ -429,14 +429,14 @@ class PreferenceStorageManager:
         ).fetchone()
         current = row[0] if row[0] is not None else 0
 
-        if current < 1:
+        if current < self._CURRENT_VERSION:
             # Version 1: initial SQLite schema (preferences, associations, contexts, signals)
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                    (1, datetime.now().isoformat()),
+                    (self._CURRENT_VERSION, datetime.now().isoformat()),
                 )
-            print(f"  [storage] Applied migration: schema v1")
+            print(f"  [storage] Applied migration: schema v{self._CURRENT_VERSION}")
 
     def get_storage_info(self) -> Dict[str, Any]:
         return {
@@ -494,9 +494,12 @@ class PreferenceStorageManager:
                 self._conn.execute(f"DELETE FROM {table}")
 
     def close(self) -> None:
-        """Close the SQLite connection and checkpoint the WAL file."""
+        """Close the SQLite connection and checkpoint the WAL file. Idempotent."""
+        if self._conn is None:
+            return
         self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._conn.close()
+        self._conn = None
 
     def __enter__(self) -> "PreferenceStorageManager":
         return self
