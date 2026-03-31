@@ -205,14 +205,14 @@ Examples of preferences:
   • Tone: "formal", "casual", "technical"
   • Structure: "outline first", "examples first", "summary last"
 
-Quick start: Choose a user profile that matches you:
-  1. DEVELOPER - Code blocks, technical depth, API tables
-  2. ANALYST   - Data tables, CSV, detailed breakdowns
-  3. WRITER    - Prose, long-form, emotional depth
-  4. EXECUTIVE - Bullet summaries, brevity, high-level
-  5. LEARNER   - Step-by-step, examples, gentle tone
+Quick start: Choose a profile that matches you (or use 0 for a demo):
+  0. Demo only  - Create one sample preference manually
+  1. python-developer   - Type hints, pytest, Google docstrings
+  2. technical-writer   - Markdown headers, code examples, thorough
+  3. code-reviewer      - Inline comments, severity labels, correctness-first
+  4. concise-communicator - Short responses, direct tone, minimal bullets
 
-Or skip to create a custom preference.
+You will be asked to enter a number after this screen loads.
 
 For this demo, we'll create:
   Name: output_format
@@ -551,14 +551,15 @@ Happy learning! The system will improve with every interaction. 🚀
         template_manager = PreferenceTemplateManager()
         templates = template_manager.list_templates()
 
-        print("\nChoose how to start:")
-        print("  0. Demo preference only")
+        print("\nChoose how to start (type a number and press Enter):")
+        print("  0. Demo preference only  [default]")
         for index, template in enumerate(templates, start=1):
-            print(f"  {index}. {template['key']:10s} - {template['name']}")
+            print(f"  {index}. {template['key']:25s} - {template['name']}")
         print("  q. Quit onboarding")
+        print()
 
         while True:
-            choice = input("Select an option [0]: ").strip().lower()
+            choice = input("Enter your choice [0]: ").strip().lower()
             if choice == "":
                 return None
             if choice == "q":
@@ -931,7 +932,7 @@ Happy learning! The system will improve with every interaction. 🚀
         for template in templates:
             output += f"  {template['key']:10s} - {template['name']:10s}\n"
             output += f"    {template['description']}\n"
-            output += f"    ({template['preference_count']} preferences)\n\n"
+            output += f"    ({template['count']} preferences)\n\n"
 
         output += "You can apply any of these templates to get started,\nor create a custom preference from scratch.\n"
         print(output)
