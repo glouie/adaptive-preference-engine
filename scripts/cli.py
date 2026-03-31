@@ -21,6 +21,7 @@ from scripts.preference_loader import PreferenceLoader
 from scripts.signal_processor import SignalProcessor, StrengthCalculator
 from scripts.config import AdaptiveConfig
 from scripts.sync import SyncRunner
+from scripts.preference_templates import list_templates, get_template
 
 
 class AdaptivePreferenceCLI:
@@ -318,6 +319,10 @@ class AdaptivePreferenceCLI:
         print(f"   Associations: {info['associations_count']}")
         print(f"   Contexts: {info['contexts_count']}")
         print(f"   Signals: {info['signals_count']}")
+        # Hint sync if not configured
+        cfg = AdaptiveConfig(str(self.storage.base_dir))
+        if not cfg.sync_repo_path:
+            print(f"\n💡 Tip: sync preferences across machines with 'adaptive-cli sync configure --repo-path <path>'")
     
     def cmd_reset(self, args):
         """Reset all preferences"""
@@ -388,12 +393,66 @@ class AdaptivePreferenceCLI:
         runner = SyncRunner(self.storage, cfg.sync_repo_path)
         print("\n🔄 Sync Status")
         print(f"   Repo: {cfg.sync_repo_path}")
+
+        # Show unpushed preference counts
+        pending = runner.pending_counts()
+        if pending:
+            print(f"\n⚠️  Unpushed changes (run 'adaptive-cli sync push'):")
+            for table, count in pending.items():
+                print(f"   {count} {table} not yet pushed")
+        else:
+            total_prefs = self.storage.get_storage_info()["preferences_count"]
+            if total_prefs == 0:
+                print("   No preferences to sync yet.")
+            else:
+                print("✅ All preferences are pushed.")
+
+        # Show git repo status
         status = runner.status()
         if status.strip():
-            print("\n⚠️  Unpushed changes:")
+            print(f"\n⚠️  Uncommitted changes in repo:")
             print(status)
-        else:
-            print("✅ Sync repo is clean — no pending changes.")
+
+    def cmd_template_list(self, args):
+        """List available preference templates."""
+        templates = list_templates()
+        print(f"\n📋 Available Templates ({len(templates)})\n")
+        for t in templates:
+            print(f"  {t['key']}")
+            print(f"    {t['name']} — {t['description']}")
+            print(f"    {t['count']} preferences")
+            print()
+        print("Apply a template: adaptive-cli template apply <name>")
+
+    def cmd_template_apply(self, args):
+        """Apply a built-in preference template."""
+        from scripts.models import Preference, generate_id
+        from datetime import datetime as _dt
+        try:
+            tmpl = get_template(args.template_name)
+        except KeyError as e:
+            print(f"❌ {e}")
+            return
+        created = _dt.now().isoformat()
+        count = 0
+        for p in tmpl["preferences"]:
+            pref = Preference(
+                id=generate_id("pref"),
+                path=p["path"],
+                parent_id=None,
+                name=p["name"],
+                type=p["type"],
+                value=p.get("value"),
+                confidence=0.7,
+                description=p.get("description", ""),
+                created=created,
+                last_updated=created,
+                auto_detected=False,
+            )
+            self.storage.preferences.save_preference(pref)
+            count += 1
+        print(f"✅ Applied template '{tmpl['name']}': {count} preferences created.")
+        print("   Run 'adaptive-cli pref list' to see them.")
 
 
 def main():
@@ -419,6 +478,15 @@ Examples:
 
   # Generate agent context
   adaptive-cli agent-context --context python fastapi --output context.json
+
+  # Set up cross-machine sync
+  adaptive-cli sync configure --repo-path ~/repos/my-prefs-repo
+
+  # Push preferences to sync repo
+  adaptive-cli sync push
+
+  # Pull preferences on another machine
+  adaptive-cli sync pull
         """
     )
     
@@ -528,6 +596,13 @@ Examples:
     sync_sub.add_parser("pull", help="Pull from remote and import into local SQLite")
     sync_sub.add_parser("status", help="Show sync repo git status")
 
+    # template
+    template_parser = subparsers.add_parser("template", help="Apply built-in preference templates")
+    template_sub = template_parser.add_subparsers(dest="template_subcommand")
+    template_sub.add_parser("list", help="List available templates")
+    template_apply = template_sub.add_parser("apply", help="Apply a template by name")
+    template_apply.add_argument("template_name", help="Template name (see: adaptive-cli template list)")
+
     parser.add_argument(
         "--base-dir",
         default=None,
@@ -597,6 +672,14 @@ Examples:
                 cli.cmd_sync_status(args)
             else:
                 sync_parser.print_help()
+
+        elif args.command == "template":
+            if args.template_subcommand == "list":
+                cli.cmd_template_list(args)
+            elif args.template_subcommand == "apply":
+                cli.cmd_template_apply(args)
+            else:
+                template_parser.print_help()
 
         else:
             parser.print_help()
