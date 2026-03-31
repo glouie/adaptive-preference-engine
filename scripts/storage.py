@@ -8,15 +8,14 @@ stored as JSON TEXT blobs so callers never deal with join queries.
 
 import json
 import os
-import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from scripts.models import (
-    Association, AssociationLearning, ContextStack,
-    LearningData, Preference, Signal,
+    Association, ContextStack,
+    Preference, Signal,
 )
 
 _SCHEMA = """
