@@ -34,7 +34,15 @@ class AdaptiveConfig:
         if self._path.exists():
             try:
                 return json.loads(self._path.read_text())
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                print(
+                    f"WARNING: Config file is malformed and will be ignored: {self._path}\n"
+                    f"  Parse error: {e}\n"
+                    f"  Delete it to reset: {self._path}"
+                )
+                return {}
+            except OSError as e:
+                print(f"WARNING: Could not read config file {self._path}: {e}")
                 return {}
         return {}
 

@@ -369,11 +369,14 @@ class AdaptivePreferenceCLI:
         result = runner.pull()
         c = result["counts"]
         if result.get("git_pull_error"):
-            print(f"⚠️  git pull failed: {result['git_pull_error']}")
-            print("   Importing from local repo state.")
-        print("✅ Preferences imported from sync repo.")
-        print(f"   {c['preferences']} preferences, {c['associations']} associations, "
-              f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
+            print(f"❌ git pull failed: {result['git_pull_error']}")
+            print("⚠️  Importing from local (possibly stale) repo state.")
+            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                  f"{c['contexts']} contexts, {c['signals']} signals imported from local state")
+        else:
+            print("✅ Preferences pulled from sync repo.")
+            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                  f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
 
     def cmd_sync_status(self, args):
         """Show sync repo git status."""

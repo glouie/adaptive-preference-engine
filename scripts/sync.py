@@ -70,29 +70,45 @@ class PreferenceSync:
             try:
                 mgr.preferences.save_preference(Preference.from_dict(d))
                 counts["preferences"] += 1
+            except (ValueError, KeyError, TypeError) as e:
+                print(f"  WARNING: Skipping malformed preference {d.get('id')}: {e}")
             except Exception as e:
-                print(f"  ⚠  preference {d.get('id')}: {e}")
+                raise RuntimeError(
+                    f"Unexpected error importing preference {d.get('id')}: {e}"
+                ) from e
 
         for d in _read_jsonl(src_dir / "associations.jsonl"):
             try:
                 mgr.associations.save_association(Association.from_dict(d))
                 counts["associations"] += 1
+            except (ValueError, KeyError, TypeError) as e:
+                print(f"  WARNING: Skipping malformed association {d.get('id')}: {e}")
             except Exception as e:
-                print(f"  ⚠  association {d.get('id')}: {e}")
+                raise RuntimeError(
+                    f"Unexpected error importing association {d.get('id')}: {e}"
+                ) from e
 
         for d in _read_jsonl(src_dir / "contexts.jsonl"):
             try:
                 mgr.contexts.save_context(ContextStack.from_dict(d))
                 counts["contexts"] += 1
+            except (ValueError, KeyError, TypeError) as e:
+                print(f"  WARNING: Skipping malformed context {d.get('id')}: {e}")
             except Exception as e:
-                print(f"  ⚠  context {d.get('id')}: {e}")
+                raise RuntimeError(
+                    f"Unexpected error importing context {d.get('id')}: {e}"
+                ) from e
 
         for d in _read_jsonl(src_dir / "signals.jsonl"):
             try:
                 mgr.signals.save_signal(Signal.from_dict(d))
                 counts["signals"] += 1
+            except (ValueError, KeyError, TypeError) as e:
+                print(f"  WARNING: Skipping malformed signal {d.get('id')}: {e}")
             except Exception as e:
-                print(f"  ⚠  signal {d.get('id')}: {e}")
+                raise RuntimeError(
+                    f"Unexpected error importing signal {d.get('id')}: {e}"
+                ) from e
 
         return counts
 
@@ -172,13 +188,13 @@ def _read_jsonl(path: Path) -> list:
         return []
     out = []
     with open(path) as f:
-        for line in f:
+        for lineno, line in enumerate(f, 1):
             line = line.strip()
             if line:
                 try:
                     out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    print(f"  WARNING: Skipping malformed line {lineno} in {path.name}: {e}")
     return out
 
 
