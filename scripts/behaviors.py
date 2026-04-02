@@ -117,7 +117,9 @@ class BehaviorStorage:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def save_behavior(self, behavior: Behavior) -> None:
+    def save_behavior(self, behavior: Behavior, update_deps: bool = True) -> None:
+        """Persist a behavior record. Pass update_deps=False when only scalar fields
+        changed (e.g. toggling enabled) to skip unnecessary junction table churn."""
         d = behavior.to_dict()
         with self._conn:
             self._conn.execute("""
@@ -143,57 +145,82 @@ class BehaviorStorage:
                     verify_script  = excluded.verify_script,
                     last_updated   = excluded.last_updated
             """, {**d, "enabled": int(d["enabled"])})
-            # Replace junction rows
-            self._conn.execute("DELETE FROM behavior_behavior_deps WHERE behavior_id = ?", (behavior.id,))
-            for dep_id in behavior.behavior_deps:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO behavior_behavior_deps (behavior_id, dep_id) VALUES (?, ?)",
-                    (behavior.id, dep_id)
-                )
-            self._conn.execute("DELETE FROM behavior_pref_deps WHERE behavior_id = ?", (behavior.id,))
-            for pref_path in behavior.pref_deps:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO behavior_pref_deps (behavior_id, pref_path) VALUES (?, ?)",
-                    (behavior.id, pref_path)
-                )
+            if update_deps:
+                self._conn.execute("DELETE FROM behavior_behavior_deps WHERE behavior_id = ?", (behavior.id,))
+                for dep_id in behavior.behavior_deps:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO behavior_behavior_deps (behavior_id, dep_id) VALUES (?, ?)",
+                        (behavior.id, dep_id)
+                    )
+                self._conn.execute("DELETE FROM behavior_pref_deps WHERE behavior_id = ?", (behavior.id,))
+                for pref_path in behavior.pref_deps:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO behavior_pref_deps (behavior_id, pref_path) VALUES (?, ?)",
+                        (behavior.id, pref_path)
+                    )
 
     def get_behavior(self, behavior_id: str) -> Optional[Behavior]:
         row = self._conn.execute("SELECT * FROM behaviors WHERE id = ?", (behavior_id,)).fetchone()
-        return self._row_to_behavior(row) if row else None
+        return self._row_to_behavior(row, {}, {}) if row else None
 
     def get_behavior_by_name(self, name: str) -> Optional[Behavior]:
         row = self._conn.execute("SELECT * FROM behaviors WHERE name = ?", (name,)).fetchone()
-        return self._row_to_behavior(row) if row else None
+        if not row:
+            return None
+        bid = dict(row)["id"]
+        bdeps = {bid: [r[0] for r in self._conn.execute(
+            "SELECT dep_id FROM behavior_behavior_deps WHERE behavior_id = ?", (bid,)
+        ).fetchall()]}
+        pdeps = {bid: [r[0] for r in self._conn.execute(
+            "SELECT pref_path FROM behavior_pref_deps WHERE behavior_id = ?", (bid,)
+        ).fetchall()]}
+        return self._row_to_behavior(row, bdeps, pdeps)
 
     def get_all_behaviors(self) -> List[Behavior]:
         rows = self._conn.execute("SELECT * FROM behaviors ORDER BY name").fetchall()
-        return [self._row_to_behavior(r) for r in rows]
+        return self._fetch_with_deps(rows)
 
     def get_enabled_behaviors(self) -> List[Behavior]:
         rows = self._conn.execute(
             "SELECT * FROM behaviors WHERE enabled = 1 ORDER BY name"
         ).fetchall()
-        return [self._row_to_behavior(r) for r in rows]
+        return self._fetch_with_deps(rows)
 
     def delete_behavior(self, behavior_id: str) -> bool:
-        if self.get_behavior(behavior_id) is None:
-            return False
         with self._conn:
-            self._conn.execute("DELETE FROM behaviors WHERE id = ?", (behavior_id,))
-        return True
+            cursor = self._conn.execute("DELETE FROM behaviors WHERE id = ?", (behavior_id,))
+        return cursor.rowcount > 0
 
-    def _row_to_behavior(self, row: sqlite3.Row) -> Behavior:
+    def _fetch_with_deps(self, rows: List[sqlite3.Row]) -> List["Behavior"]:
+        """Batch-load junction rows in 2 queries instead of 2N."""
+        if not rows:
+            return []
+        ids = [dict(r)["id"] for r in rows]
+        placeholders = ",".join("?" * len(ids))
+        bdep_rows = self._conn.execute(
+            f"SELECT behavior_id, dep_id FROM behavior_behavior_deps WHERE behavior_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        pdep_rows = self._conn.execute(
+            f"SELECT behavior_id, pref_path FROM behavior_pref_deps WHERE behavior_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        bdeps: Dict[str, List[str]] = {}
+        pdeps: Dict[str, List[str]] = {}
+        for r in bdep_rows:
+            bdeps.setdefault(r[0], []).append(r[1])
+        for r in pdep_rows:
+            pdeps.setdefault(r[0], []).append(r[1])
+        return [self._row_to_behavior(r, bdeps, pdeps) for r in rows]
+
+    def _row_to_behavior(
+        self,
+        row: sqlite3.Row,
+        bdeps: Dict[str, List[str]],
+        pdeps: Dict[str, List[str]],
+    ) -> "Behavior":
         d = dict(row)
         d["enabled"] = bool(d["enabled"])
-        # Load junction rows
-        dep_rows = self._conn.execute(
-            "SELECT dep_id FROM behavior_behavior_deps WHERE behavior_id = ?", (d["id"],)
-        ).fetchall()
-        d["behavior_deps"] = [r[0] for r in dep_rows]
-        pref_rows = self._conn.execute(
-            "SELECT pref_path FROM behavior_pref_deps WHERE behavior_id = ?", (d["id"],)
-        ).fetchall()
-        d["pref_deps"] = [r[0] for r in pref_rows]
         return Behavior(
             id=d["id"],
             name=d["name"],
@@ -210,8 +237,8 @@ class BehaviorStorage:
             created=d["created"],
             last_updated=d["last_updated"],
             installed_at=d["installed_at"],
-            behavior_deps=d["behavior_deps"],
-            pref_deps=d["pref_deps"],
+            behavior_deps=bdeps.get(d["id"], []),
+            pref_deps=pdeps.get(d["id"], []),
         )
 
 
@@ -247,13 +274,10 @@ def parse_ape_header(path: str) -> dict:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.rstrip("\r\n")
-                # Skip blank lines
                 if not line.strip():
                     continue
-                # Only parse comment lines
                 if not line.startswith("#"):
                     continue
-                # Only care about APE- headers
                 if not line.startswith("# APE-"):
                     continue
                 rest = line[2:]  # strip "# "
