@@ -12,7 +12,7 @@ import json
 from scripts.models import Preference, Association, Signal, generate_id
 from scripts.paths import get_base_dir
 from scripts.storage import PreferenceStorageManager
-from scripts.signal_processor import SignalProcessor
+from adaptive_preference_engine.services.signals import SignalProcessor
 from scripts.user_feedback_system import UserFeedbackSystem
 from scripts.preference_templates import PreferenceTemplateManager
 

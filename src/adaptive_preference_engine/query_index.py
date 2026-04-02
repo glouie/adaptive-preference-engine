@@ -582,10 +582,11 @@ class _IndexedPreferenceStorage:
         self._index.update(preference)
 
     def delete_preference(self, pref_id: str) -> bool:
-        deleted = self._storage.delete_preference(pref_id)
-        if deleted:
+        in_index = pref_id in self._index.id_index
+        self._storage.delete_preference(pref_id)
+        if in_index:
             self._index.remove(pref_id)
-        return deleted
+        return in_index
 
 
 class _IndexedAssociationStorage:

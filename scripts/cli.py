@@ -18,7 +18,7 @@ from scripts.models import (
 )
 from scripts.storage import PreferenceStorageManager
 from scripts.preference_loader import PreferenceLoader
-from scripts.signal_processor import SignalProcessor, StrengthCalculator
+from adaptive_preference_engine.services.signals import SignalProcessor, StrengthCalculator
 from scripts.config import AdaptiveConfig
 from scripts.sync import SyncRunner
 from scripts.preference_templates import list_templates, get_template

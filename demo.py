@@ -7,13 +7,10 @@ Shows complete workflow: create prefs, associations, contexts, learn from signal
 import sys
 from pathlib import Path
 
-# Add scripts to path
-sys.path.insert(0, str(Path(__file__).parent / "scripts"))
-
-from models import Preference, Association, AssociationLearning, ContextStack, generate_id
-from storage import PreferenceStorageManager
-from preference_loader import PreferenceLoader
-from signal_processor import SignalProcessor
+from adaptive_preference_engine.models import Preference, Association, AssociationLearning, ContextStack, generate_id
+from scripts.storage import PreferenceStorageManager
+from scripts.preference_loader import PreferenceLoader
+from adaptive_preference_engine.services.signals import SignalProcessor
 import json
 
 
