@@ -532,6 +532,151 @@ class AdaptivePreferenceCLI:
         if count > 0:
             print("   Run 'adaptive-cli pref list' to see them.")
 
+    # ---- Behavior Management ----
+
+    def cmd_behavior_list(self, args):
+        """List all installed behaviors."""
+        behaviors = self.storage.behaviors.get_all_behaviors()
+        if not behaviors:
+            print("No behaviors installed.")
+            return
+        print(f"\n🤖 Behaviors ({len(behaviors)} total)")
+        print("─" * 80)
+        for b in behaviors:
+            status = "✓" if b.enabled else "○"
+            hook = f" [{b.hook_event}/{b.hook_matcher}]" if b.hook_event else ""
+            print(f"{status} {b.name}  v{b.version}  ({b.platform}){hook}")
+            if b.description:
+                print(f"   {b.description}")
+
+    def cmd_behavior_show(self, args):
+        """Show full details of a named behavior."""
+        b = self.storage.behaviors.get_behavior_by_name(args.name)
+        if not b:
+            print(f"❌ Behavior not found: {args.name}")
+            return
+        print(f"\n🤖 Behavior: {b.name}")
+        print(f"   ID: {b.id}")
+        print(f"   Version: {b.version}")
+        print(f"   Platform: {b.platform}")
+        print(f"   Enabled: {b.enabled}")
+        print(f"   Hook: {b.hook_event}/{b.hook_matcher}" if b.hook_event else "   Hook: none")
+        if b.artifact_path:
+            print(f"   Artifact: {b.artifact_path}")
+        if b.description:
+            print(f"   Description: {b.description}")
+        if b.behavior_deps:
+            print(f"   Behavior deps: {', '.join(b.behavior_deps)}")
+        if b.pref_deps:
+            print(f"   Pref deps: {', '.join(b.pref_deps)}")
+        print(f"   Installed: {b.installed_at[:10]}")
+
+    def cmd_behavior_add(self, args):
+        """Register a new behavior in the DB."""
+        from scripts.behaviors import Behavior
+        existing = self.storage.behaviors.get_behavior_by_name(args.name)
+        if existing:
+            print(f"❌ Behavior already exists: {args.name}  (use 'behavior update' to change it)")
+            return
+        b = Behavior(
+            id=generate_id("beh"),
+            name=args.name,
+            version=args.version or "1.0.0",
+            description=args.description or "",
+            platform=args.platform or "any",
+            enabled=True,
+            hook_event=args.hook_event,
+            hook_matcher=args.hook_matcher,
+            artifact_path=args.artifact_path,
+            setup_script=args.setup_script,
+            verify_script=args.verify_script,
+            pref_deps=args.pref_dep or [],
+        )
+        self.storage.behaviors.save_behavior(b)
+        print(f"✅ Registered behavior: {b.name}  v{b.version}")
+        if b.setup_script:
+            print(f"   Run 'adaptive-cli behavior setup {b.name}' to execute setup script.")
+
+    def cmd_behavior_toggle(self, args):
+        """Enable or disable a behavior."""
+        b = self.storage.behaviors.get_behavior_by_name(args.name)
+        if not b:
+            print(f"❌ Behavior not found: {args.name}")
+            return
+        b.enabled = args.enable
+        self.storage.behaviors.save_behavior(b)
+        state = "enabled" if args.enable else "disabled"
+        print(f"✅ Behavior {b.name} {state}.")
+
+    def cmd_behavior_remove(self, args):
+        """Remove a behavior from the DB."""
+        b = self.storage.behaviors.get_behavior_by_name(args.name)
+        if not b:
+            print(f"❌ Behavior not found: {args.name}")
+            return
+        self.storage.behaviors.delete_behavior(b.id)
+        print(f"✅ Removed behavior: {b.name}")
+        if b.artifact_path:
+            print(f"   Artifact at: {b.artifact_path}")
+            print(f"   Delete manually if no longer needed.")
+
+    def cmd_behavior_verify(self, args):
+        """Run verify_script for each enabled behavior (or the named one)."""
+        import subprocess
+        if args.name:
+            behaviors = [self.storage.behaviors.get_behavior_by_name(args.name)]
+            if not behaviors[0]:
+                print(f"❌ Behavior not found: {args.name}")
+                return
+        else:
+            behaviors = self.storage.behaviors.get_enabled_behaviors()
+        if not behaviors:
+            print("No behaviors to verify.")
+            return
+        all_ok = True
+        for b in behaviors:
+            if not b.verify_script:
+                print(f"  ○ {b.name}: no verify script")
+                continue
+            result = subprocess.run(b.verify_script, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"  ✓ {b.name}: ok")
+            else:
+                print(f"  ✗ {b.name}: FAILED")
+                if result.stdout.strip():
+                    print(f"    stdout: {result.stdout.strip()[:200]}")
+                if result.stderr.strip():
+                    print(f"    stderr: {result.stderr.strip()[:200]}")
+                all_ok = False
+        if not all_ok:
+            import sys as _sys; _sys.exit(1)
+
+    def cmd_behavior_setup(self, args):
+        """Run setup_script for each behavior (or the named one)."""
+        import subprocess
+        if args.name:
+            behaviors = [self.storage.behaviors.get_behavior_by_name(args.name)]
+            if not behaviors[0]:
+                print(f"❌ Behavior not found: {args.name}")
+                return
+        else:
+            behaviors = self.storage.behaviors.get_all_behaviors()
+        if not behaviors:
+            print("No behaviors to set up.")
+            return
+        for b in behaviors:
+            if not b.setup_script:
+                print(f"  ○ {b.name}: no setup script")
+                continue
+            print(f"  ⚙ {b.name}: running setup...")
+            result = subprocess.run(b.setup_script, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"  ✓ {b.name}: setup complete")
+            else:
+                print(f"  ✗ {b.name}: setup FAILED (exit {result.returncode})")
+                if result.stderr.strip():
+                    print(f"    {result.stderr.strip()[:300]}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -689,6 +834,42 @@ Examples:
     template_apply = template_sub.add_parser("apply", help="Apply a template by name")
     template_apply.add_argument("template_name", help="Template name (see: adaptive-cli template list)")
 
+    # behavior
+    behavior_parser = subparsers.add_parser("behavior", help="Manage automation behaviors")
+    behavior_sub = behavior_parser.add_subparsers(dest="behavior_subcommand")
+
+    behavior_sub.add_parser("list", help="List installed behaviors")
+
+    beh_show = behavior_sub.add_parser("show", help="Show behavior details")
+    beh_show.add_argument("name")
+
+    beh_add = behavior_sub.add_parser("add", help="Register a behavior")
+    beh_add.add_argument("--name", required=True)
+    beh_add.add_argument("--version", default="1.0.0")
+    beh_add.add_argument("--description", default="")
+    beh_add.add_argument("--platform", default="any", choices=["any", "github", "gitlab", "bitbucket"])
+    beh_add.add_argument("--hook-event", default=None, dest="hook_event")
+    beh_add.add_argument("--hook-matcher", default=None, dest="hook_matcher")
+    beh_add.add_argument("--artifact-path", default=None, dest="artifact_path")
+    beh_add.add_argument("--setup-script", default=None, dest="setup_script")
+    beh_add.add_argument("--verify-script", default=None, dest="verify_script")
+    beh_add.add_argument("--pref-dep", action="append", default=None, dest="pref_dep")
+
+    beh_toggle = behavior_sub.add_parser("toggle", help="Enable or disable a behavior")
+    beh_toggle.add_argument("name")
+    toggle_group = beh_toggle.add_mutually_exclusive_group(required=True)
+    toggle_group.add_argument("--enable", action="store_true")
+    toggle_group.add_argument("--disable", dest="enable", action="store_false")
+
+    beh_remove = behavior_sub.add_parser("remove", help="Remove a behavior")
+    beh_remove.add_argument("name")
+
+    beh_verify = behavior_sub.add_parser("verify", help="Verify behavior health")
+    beh_verify.add_argument("--name", default=None)
+
+    beh_setup = behavior_sub.add_parser("setup", help="Run setup scripts")
+    beh_setup.add_argument("--name", default=None)
+
     parser.add_argument(
         "--base-dir",
         default=None,
@@ -769,6 +950,24 @@ Examples:
                 cli.cmd_template_apply(args)
             else:
                 template_parser.print_help()
+
+        elif args.command == "behavior":
+            if args.behavior_subcommand == "list":
+                cli.cmd_behavior_list(args)
+            elif args.behavior_subcommand == "show":
+                cli.cmd_behavior_show(args)
+            elif args.behavior_subcommand == "add":
+                cli.cmd_behavior_add(args)
+            elif args.behavior_subcommand == "toggle":
+                cli.cmd_behavior_toggle(args)
+            elif args.behavior_subcommand == "remove":
+                cli.cmd_behavior_remove(args)
+            elif args.behavior_subcommand == "verify":
+                cli.cmd_behavior_verify(args)
+            elif args.behavior_subcommand == "setup":
+                cli.cmd_behavior_setup(args)
+            else:
+                behavior_parser.print_help()
 
         else:
             parser.print_help()
