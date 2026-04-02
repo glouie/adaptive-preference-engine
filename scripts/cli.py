@@ -930,13 +930,16 @@ class AdaptivePreferenceCLI:
             lines.append(f"# APE-PREF-DEP: {pd}")
         lines += [
             "#",
+            "# ── Versioning convention (MAJOR.MINOR.PATCH) ───────────────────────",
+            "# MAJOR: breaking contract change (hook event, stdin format, what it modifies)",
+            "# MINOR: new capability, backward-compatible",
+            "# PATCH: bug fixes, behavior edits, internal tweaks",
+            "#",
             "# ── Implementation ──────────────────────────────────────────────────",
             "# stdin (JSON) available on PostToolUse/PreToolUse hooks.",
             "# Exit 0 = silent success.",
             "# Exit 2 + JSON {hookSpecificOutput:{hookEventName:...,additionalContext:...}}",
             "#   = wake Claude with context.",
-            "",
-            "# TODO: implement behavior logic here",
             "",
         ]
         artifact_path.write_text("\n".join(lines), encoding="utf-8")
