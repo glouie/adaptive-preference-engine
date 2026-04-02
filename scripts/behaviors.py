@@ -213,3 +213,91 @@ class BehaviorStorage:
             behavior_deps=d["behavior_deps"],
             pref_deps=d["pref_deps"],
         )
+
+
+def parse_ape_header(path: str) -> dict:
+    """Parse APE-* header comments from a behavior artifact file.
+
+    Scans ALL comment lines in the file (lines starting with '#'), ignoring
+    non-comment lines. This means headers can appear anywhere in the comment
+    block — after the shebang, after 'set -euo pipefail', etc.
+
+    Required fields: APE-BEHAVIOR, APE-VERSION.
+    Raises ValueError with a helpful message if either is missing.
+
+    Returns dict with keys:
+        name, version, platform, hook_event, hook_matcher, enabled,
+        description, verify_script, setup_script, pref_deps (list, deduplicated)
+    """
+    result = {
+        "name": None,
+        "version": None,
+        "platform": "any",
+        "hook_event": None,
+        "hook_matcher": None,
+        "enabled": True,
+        "description": "",
+        "verify_script": None,
+        "setup_script": None,
+        "pref_deps": [],
+    }
+    _seen_pref_deps: set = set()
+
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\r\n")
+                # Skip blank lines
+                if not line.strip():
+                    continue
+                # Only parse comment lines
+                if not line.startswith("#"):
+                    continue
+                # Only care about APE- headers
+                if not line.startswith("# APE-"):
+                    continue
+                rest = line[2:]  # strip "# "
+                if ":" not in rest:
+                    continue
+                key, _, value = rest.partition(":")
+                key = key.strip()
+                value = value.strip()
+
+                if key == "APE-BEHAVIOR":
+                    result["name"] = value
+                elif key == "APE-VERSION":
+                    result["version"] = value
+                elif key == "APE-PLATFORM":
+                    result["platform"] = value
+                elif key == "APE-HOOK-EVENT":
+                    result["hook_event"] = value if value.lower() != "none" else None
+                elif key == "APE-HOOK-MATCHER":
+                    result["hook_matcher"] = value if value.lower() != "none" else None
+                elif key == "APE-STATUS":
+                    result["enabled"] = value.lower() == "enabled"
+                elif key == "APE-DESCRIPTION":
+                    result["description"] = value
+                elif key == "APE-VERIFY":
+                    result["verify_script"] = value
+                elif key == "APE-SETUP":
+                    result["setup_script"] = value
+                elif key == "APE-PREF-DEP":
+                    if value and value not in _seen_pref_deps:
+                        _seen_pref_deps.add(value)
+                        result["pref_deps"].append(value)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Artifact file not found: {path}")
+
+    missing = []
+    if not result["name"]:
+        missing.append("APE-BEHAVIOR")
+    if not result["version"]:
+        missing.append("APE-VERSION")
+    if missing:
+        raise ValueError(
+            f"Missing required APE header(s) in {path}: {', '.join(missing)}\n"
+            f"  Add these lines anywhere in the comment block (lines starting with '#'):\n"
+            + "\n".join(f"  # {m}: <value>" for m in missing)
+        )
+
+    return result

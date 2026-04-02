@@ -534,6 +534,232 @@ class AdaptivePreferenceCLI:
 
     # ---- Behavior Management ----
 
+    # ---- Behavior helpers ----
+
+    @staticmethod
+    def _slugify(name: str) -> str:
+        """Lowercase, replace non-alphanumeric with hyphens, strip edge hyphens."""
+        import re
+        return re.sub(r"[^a-z0-9\-]", "-", name.lower()).strip("-")
+
+    def _run_behavior_wizard(self) -> Optional[dict]:
+        """Interactive wizard to collect all behavior fields.
+
+        Returns a dict of fields, or None if the user aborted.
+        Requires an interactive terminal — exits with an error if stdin is not a TTY.
+        """
+        import sys
+        if not sys.stdin.isatty():
+            print("❌ The behavior wizard requires an interactive terminal.")
+            print("   Use flags instead:  adaptive-cli behavior add --name <n> [--flags...]")
+            print("   Or non-interactively: adaptive-cli behavior install <path>")
+            return None
+
+        PLATFORMS = ["any", "github", "gitlab", "bitbucket", "azure-devops", "gitea"]
+        HOOK_EVENTS = ["PostToolUse", "PreToolUse", "SessionStart", "Stop", "none"]
+        MATCHERS = ["Bash", "Write", "Edit", "Read", "Glob", "Grep", "other"]
+
+        def _menu(label: str, choices: list, default: str) -> str:
+            print(f"\n{label}")
+            for i, c in enumerate(choices, 1):
+                marker = " ← default" if c == default else ""
+                print(f"  {i}. {c}{marker}")
+            while True:
+                raw = input(f"  Select [{choices.index(default) + 1 if default in choices else ''}]: ").strip()
+                if not raw:
+                    return default
+                try:
+                    idx = int(raw) - 1
+                    if 0 <= idx < len(choices):
+                        return choices[idx]
+                except ValueError:
+                    if raw in choices:
+                        return raw
+                print(f"  Enter a number 1–{len(choices)}.")
+
+        def _ask(label: str, default=None, required: bool = False) -> Optional[str]:
+            hint = f" [{default}]" if default is not None else (" (required)" if required else " (optional, Enter to skip)")
+            while True:
+                raw = input(f"{label}{hint}: ").strip()
+                if raw:
+                    return raw
+                if default is not None:
+                    return default
+                if not required:
+                    return None
+                print("  This field is required.")
+
+        print("\n🤖 Behavior Wizard")
+        print("─" * 60)
+        print("Answer each question. Enter accepts the default shown in [brackets].\n")
+
+        name_raw = _ask("Name", required=True)
+        name = self._slugify(name_raw)
+        if name != name_raw:
+            print(f"  → slug: {name}")
+
+        description = _ask("Description")
+        version = _ask("Version", default="1.0.0")
+
+        platform = _menu("Platform (which VCS does this target?)", PLATFORMS, "any")
+
+        hook_event_raw = _menu("Hook event (when should this trigger?)", HOOK_EVENTS, "PostToolUse")
+        hook_event = hook_event_raw if hook_event_raw != "none" else None
+
+        hook_matcher = None
+        if hook_event in ("PostToolUse", "PreToolUse"):
+            matcher_raw = _menu("Hook matcher (which tool triggers this?)", MATCHERS, "Bash")
+            if matcher_raw == "other":
+                hook_matcher = _ask("  Custom matcher name", required=True)
+            else:
+                hook_matcher = matcher_raw
+
+        default_artifact = str(Path.home() / ".adaptive-cli" / "behaviors" / f"{name}.sh")
+        artifact_path = _ask("Artifact path", default=default_artifact)
+        if artifact_path:
+            artifact_path = str(Path(artifact_path).expanduser())
+
+        # Build verify script suggestion
+        verify_parts = []
+        if artifact_path:
+            verify_parts.append(f"test -f {artifact_path}")
+        tools_raw = _ask("Required tools (comma-separated, e.g. 'gh,jq')")
+        if tools_raw:
+            for tool in [t.strip() for t in tools_raw.split(",") if t.strip()]:
+                verify_parts.append(f"command -v {tool} >/dev/null 2>&1")
+        auto_verify = " && ".join(verify_parts) if verify_parts else None
+
+        verify_script = _ask("Verify script", default=auto_verify)
+
+        setup_script = _ask("Setup script (run once on install)")
+
+        pref_deps_raw = _ask("Preference deps (comma-separated preference paths)")
+        pref_deps = [p.strip() for p in pref_deps_raw.split(",") if p.strip()] if pref_deps_raw else []
+
+        # Summary
+        print("\n" + "─" * 60)
+        print("📋 Summary")
+        print(f"  Name:        {name}")
+        print(f"  Version:     {version}")
+        print(f"  Platform:    {platform}")
+        print(f"  Description: {description or '—'}")
+        hook_str = f"{hook_event}/{hook_matcher}" if hook_event and hook_matcher else (hook_event or "none")
+        print(f"  Hook:        {hook_str}")
+        print(f"  Artifact:    {artifact_path or '—'}")
+        print(f"  Verify:      {verify_script or '—'}")
+        print(f"  Setup:       {setup_script or '—'}")
+        if pref_deps:
+            print(f"  Pref deps:   {', '.join(pref_deps)}")
+
+        confirm = input("\nRegister this behavior? [Y/n]: ").strip().lower()
+        if confirm in ("n", "no"):
+            print("Aborted.")
+            return None
+
+        return {
+            "name": name,
+            "version": version,
+            "description": description or "",
+            "platform": platform,
+            "hook_event": hook_event,
+            "hook_matcher": hook_matcher,
+            "artifact_path": artifact_path,
+            "verify_script": verify_script,
+            "setup_script": setup_script,
+            "pref_deps": pref_deps,
+        }
+
+    def _register_from_file(self, path: str, force: bool = False, non_interactive: bool = False) -> bool:
+        """Parse APE header from file and register or update the behavior in DB.
+
+        Returns True on success, False on abort or error.
+        When not interactive (non_interactive=True or stdin is not a TTY) and a
+        version change is detected, requires force=True to proceed.
+        """
+        import sys
+        from scripts.behaviors import parse_ape_header, Behavior
+        from scripts.models import generate_id
+
+        is_tty = sys.stdin.isatty() and not non_interactive
+
+        try:
+            fields = parse_ape_header(path)
+        except (ValueError, FileNotFoundError) as e:
+            print(f"❌ {e}")
+            return False
+
+        # Store path as-given (expanduser but not resolve — preserves portability)
+        fields["artifact_path"] = str(Path(path).expanduser())
+
+        existing = self.storage.behaviors.get_behavior_by_name(fields["name"])
+
+        if existing:
+            if existing.artifact_path and existing.artifact_path != fields["artifact_path"]:
+                print(f"⚠️  Warning: artifact path is changing.")
+                print(f"   Was: {existing.artifact_path}")
+                print(f"   Now: {fields['artifact_path']}")
+
+            # Diff changed fields
+            changed = []
+            for k in ("version", "description", "platform", "hook_event", "hook_matcher",
+                      "enabled", "verify_script", "setup_script", "artifact_path"):
+                old = getattr(existing, k)
+                new = fields.get(k)
+                if old != new:
+                    changed.append((k, old, new))
+
+            if not changed and not force:
+                print(f"ℹ️  {fields['name']} v{fields['version']} is already up to date.")
+                return True
+
+            print(f"🔄 Updating behavior: {fields['name']}")
+            if changed:
+                print("   Changed fields:")
+                for k, old, new in changed:
+                    print(f"     {k}: {old!r} → {new!r}")
+
+            # Confirm version change (any version change, not just major)
+            version_changed = any(k == "version" for k, _, _ in changed)
+            if version_changed and not force:
+                if not is_tty:
+                    print(f"❌ Version change detected but not running interactively.")
+                    print(f"   Use --force to apply without confirmation.")
+                    return False
+                confirm = input(f"  Apply update? [Y/n]: ").strip().lower()
+                if confirm in ("n", "no"):
+                    print("Aborted.")
+                    return False
+
+            # Apply updates
+            for k, _, new in changed:
+                setattr(existing, k, new)
+            existing.pref_deps = fields["pref_deps"]
+            from datetime import datetime as _dt
+            existing.last_updated = _dt.now().isoformat()
+            self.storage.behaviors.save_behavior(existing)
+            print(f"✅ Updated: {existing.name}  v{existing.version}")
+        else:
+            b = Behavior(
+                id=generate_id("beh"),
+                name=fields["name"],
+                version=fields["version"],
+                description=fields["description"],
+                platform=fields["platform"],
+                enabled=fields["enabled"],
+                hook_event=fields["hook_event"],
+                hook_matcher=fields["hook_matcher"],
+                artifact_path=fields["artifact_path"],
+                verify_script=fields["verify_script"],
+                setup_script=fields["setup_script"],
+                pref_deps=fields["pref_deps"],
+            )
+            self.storage.behaviors.save_behavior(b)
+            print(f"✅ Registered: {b.name}  v{b.version}")
+
+        if fields.get("setup_script"):
+            print(f"   Run 'adaptive-cli behavior setup {fields['name']}' to run setup.")
+        return True
+
     def cmd_behavior_list(self, args):
         """List all installed behaviors."""
         behaviors = self.storage.behaviors.get_all_behaviors()
@@ -572,30 +798,233 @@ class AdaptivePreferenceCLI:
         print(f"   Installed: {b.installed_at[:10]}")
 
     def cmd_behavior_add(self, args):
-        """Register a new behavior in the DB."""
         from scripts.behaviors import Behavior
-        existing = self.storage.behaviors.get_behavior_by_name(args.name)
-        if existing:
-            print(f"❌ Behavior already exists: {args.name}  (use 'behavior update' to change it)")
+        from scripts.models import generate_id
+
+        # Wizard fires only when invoked with bare 'behavior add' (no flags at all).
+        # If any flag is provided without --name, give an actionable error.
+        has_any_flag = any([
+            args.version != "1.0.0",
+            args.description,
+            args.platform != "any",
+            args.hook_event,
+            args.hook_matcher,
+            args.artifact_path,
+            args.verify_script,
+            args.setup_script,
+            args.pref_dep,
+        ])
+
+        if not args.name and has_any_flag:
+            print("❌ --name is required when using flags.")
+            print("   Run 'adaptive-cli behavior add' with no arguments to use the interactive wizard.")
             return
+
+        if not args.name:
+            # Bare invocation — launch wizard
+            fields = self._run_behavior_wizard()
+            if not fields:
+                return
+        else:
+            # Flag-based — apply same slug validation as wizard
+            fields = {
+                "name": self._slugify(args.name),
+                "version": args.version,
+                "description": args.description or "",
+                "platform": args.platform,
+                "hook_event": args.hook_event,
+                "hook_matcher": args.hook_matcher,
+                "artifact_path": str(Path(args.artifact_path).expanduser()) if args.artifact_path else None,
+                "verify_script": args.verify_script,
+                "setup_script": args.setup_script,
+                "pref_deps": args.pref_dep or [],
+            }
+            if fields["name"] != args.name:
+                print(f"  → name slug: {fields['name']}")
+
+        existing = self.storage.behaviors.get_behavior_by_name(fields["name"])
+        if existing:
+            print(f"❌ Behavior already exists: {fields['name']}")
+            print(f"   To update it, edit its artifact file and run:")
+            print(f"   adaptive-cli behavior install <path>")
+            print(f"   Or use: adaptive-cli behavior update {fields['name']}")
+            return
+
         b = Behavior(
             id=generate_id("beh"),
-            name=args.name,
-            version=args.version or "1.0.0",
-            description=args.description or "",
-            platform=args.platform or "any",
+            name=fields["name"],
+            version=fields["version"],
+            description=fields["description"],
+            platform=fields["platform"],
             enabled=True,
-            hook_event=args.hook_event,
-            hook_matcher=args.hook_matcher,
-            artifact_path=args.artifact_path,
-            setup_script=args.setup_script,
-            verify_script=args.verify_script,
-            pref_deps=args.pref_dep or [],
+            hook_event=fields["hook_event"],
+            hook_matcher=fields["hook_matcher"],
+            artifact_path=fields["artifact_path"],
+            verify_script=fields["verify_script"],
+            setup_script=fields["setup_script"],
+            pref_deps=fields["pref_deps"],
         )
         self.storage.behaviors.save_behavior(b)
         print(f"✅ Registered behavior: {b.name}  v{b.version}")
         if b.setup_script:
-            print(f"   Run 'adaptive-cli behavior setup {b.name}' to execute setup script.")
+            print(f"   Run 'adaptive-cli behavior setup {b.name}' to run setup.")
+
+    def cmd_behavior_create(self, args):
+        import sys, os, subprocess
+        if not sys.stdin.isatty():
+            print("❌ 'behavior create' requires an interactive terminal.")
+            print("   Write the artifact file manually, then run:")
+            print("   adaptive-cli behavior install <path>")
+            return
+
+        print("\n🤖 Behavior Creator")
+        print("─" * 60)
+        print("This wizard scaffolds a new behavior script with the APE header.")
+        print("After creation, edit the script to add your logic, then install it.\n")
+
+        PLATFORMS = ["any", "github", "gitlab", "bitbucket", "azure-devops", "gitea"]
+        HOOK_EVENTS = ["PostToolUse", "PreToolUse", "SessionStart", "Stop", "none"]
+        MATCHERS = ["Bash", "Write", "Edit", "Read", "Glob", "Grep", "other"]
+
+        def _menu(label, choices, default):
+            print(f"\n{label}")
+            for i, c in enumerate(choices, 1):
+                marker = " ← default" if c == default else ""
+                print(f"  {i}. {c}{marker}")
+            while True:
+                raw = input(f"  Select [{choices.index(default)+1 if default in choices else ''}]: ").strip()
+                if not raw: return default
+                try:
+                    idx = int(raw) - 1
+                    if 0 <= idx < len(choices): return choices[idx]
+                except ValueError:
+                    if raw in choices: return raw
+                print(f"  Enter a number 1–{len(choices)}.")
+
+        def _ask(label, default=None, required=False):
+            hint = f" [{default}]" if default is not None else (" (required)" if required else " (optional, Enter to skip)")
+            while True:
+                raw = input(f"{label}{hint}: ").strip()
+                if raw: return raw
+                if default is not None: return default
+                if not required: return None
+                print("  This field is required.")
+
+        name_raw = _ask("Name", required=True)
+        name = self._slugify(name_raw)
+        if name != name_raw:
+            print(f"  → slug: {name}")
+
+        description = _ask("Description")
+        version = _ask("Version", default="1.0.0")
+        platform = _menu("Platform", PLATFORMS, "any")
+        hook_event_raw = _menu("Hook event", HOOK_EVENTS, "PostToolUse")
+        hook_event = hook_event_raw if hook_event_raw != "none" else None
+        hook_matcher = None
+        if hook_event in ("PostToolUse", "PreToolUse"):
+            matcher_raw = _menu("Hook matcher", MATCHERS, "Bash")
+            hook_matcher = _ask("  Custom matcher", required=True) if matcher_raw == "other" else matcher_raw
+
+        default_artifact = str(Path.home() / ".adaptive-cli" / "behaviors" / f"{name}.sh")
+        artifact_path_raw = _ask("Artifact path", default=default_artifact)
+        artifact_path = Path(artifact_path_raw).expanduser() if artifact_path_raw else Path(default_artifact).expanduser()
+
+        verify_parts = [f"test -f {artifact_path}"]
+        tools_raw = _ask("Required tools (comma-separated, e.g. 'gh,jq')")
+        if tools_raw:
+            for tool in [t.strip() for t in tools_raw.split(",") if t.strip()]:
+                verify_parts.append(f"command -v {tool} >/dev/null 2>&1")
+        auto_verify = _ask("Verify script", default=" && ".join(verify_parts))
+        setup_script = _ask("Setup script (run once on install)")
+        pref_deps_raw = _ask("Preference deps (comma-separated)")
+        pref_deps = [p.strip() for p in pref_deps_raw.split(",") if p.strip()] if pref_deps_raw else []
+
+        # Check existence before writing
+        if artifact_path.exists() and not getattr(args, "force", False):
+            print(f"\n❌ File already exists: {artifact_path}")
+            print(f"   Use --force to overwrite, or install an existing APE-annotated file:")
+            print(f"   adaptive-cli behavior install {artifact_path}")
+            return
+
+        # Write scaffold
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        hook_event_val = hook_event or "none"
+        hook_matcher_val = hook_matcher or "none"
+        lines = [
+            "#!/bin/bash",
+            f"# APE-BEHAVIOR: {name}",
+            f"# APE-VERSION: {version}",
+            f"# APE-PLATFORM: {platform}",
+            f"# APE-HOOK-EVENT: {hook_event_val}",
+            f"# APE-HOOK-MATCHER: {hook_matcher_val}",
+            "# APE-STATUS: enabled",
+            f"# APE-DESCRIPTION: {description or ''}",
+        ]
+        if auto_verify:
+            lines.append(f"# APE-VERIFY: {auto_verify}")
+        if setup_script:
+            lines.append(f"# APE-SETUP: {setup_script}")
+        for pd in pref_deps:
+            lines.append(f"# APE-PREF-DEP: {pd}")
+        lines += [
+            "#",
+            "# ── Implementation ──────────────────────────────────────────────────",
+            "# stdin (JSON) available on PostToolUse/PreToolUse hooks.",
+            "# Exit 0 = silent success.",
+            "# Exit 2 + JSON {hookSpecificOutput:{hookEventName:...,additionalContext:...}}",
+            "#   = wake Claude with context.",
+            "",
+            "# TODO: implement behavior logic here",
+            "",
+        ]
+        artifact_path.write_text("\n".join(lines), encoding="utf-8")
+        artifact_path.chmod(0o755)
+
+        print(f"\n✅ Scaffold created: {artifact_path}")
+        print(f"\nNext steps:")
+        print(f"  1. Edit the script to add your logic")
+        print(f"  2. Install it: adaptive-cli behavior install {artifact_path}")
+
+        editor = os.environ.get("EDITOR")
+        if editor:
+            open_it = input(f"\nOpen in {editor} now? [Y/n]: ").strip().lower()
+            if open_it not in ("n", "no"):
+                result = subprocess.run([editor, str(artifact_path)])
+                if result.returncode == 0:
+                    install_it = input(f"\nInstall now? [Y/n]: ").strip().lower()
+                    if install_it not in ("n", "no"):
+                        self._register_from_file(str(artifact_path), force=False)
+
+    def cmd_behavior_install(self, args):
+        """Install a behavior from an APE-annotated artifact file."""
+        self._register_from_file(
+            args.path,
+            force=getattr(args, "force", False),
+            non_interactive=getattr(args, "non_interactive", False),
+        )
+
+    def cmd_behavior_update(self, args):
+        """Re-read a behavior's artifact and update its DB record."""
+        import sys
+        b = self.storage.behaviors.get_behavior_by_name(args.name)
+        if not b:
+            print(f"❌ Behavior not found: {args.name}")
+            print(f"   List installed behaviors: adaptive-cli behavior list")
+            return
+        if not b.artifact_path:
+            print(f"❌ Behavior '{args.name}' has no artifact_path on record.")
+            print(f"   Use: adaptive-cli behavior install <path>")
+            return
+        p = Path(b.artifact_path).expanduser()
+        if not p.exists():
+            print(f"❌ Artifact file not found: {p}")
+            print(f"   The file may have moved. Use: adaptive-cli behavior install <new-path>")
+            return
+        self._register_from_file(
+            str(p),
+            force=getattr(args, "force", False),
+            non_interactive=getattr(args, "non_interactive", False),
+        )
 
     def cmd_behavior_toggle(self, args):
         """Enable or disable a behavior."""
@@ -624,10 +1053,11 @@ class AdaptivePreferenceCLI:
         """Run verify_script for each enabled behavior (or the named one)."""
         import subprocess
         if args.name:
-            behaviors = [self.storage.behaviors.get_behavior_by_name(args.name)]
-            if not behaviors[0]:
+            b = self.storage.behaviors.get_behavior_by_name(args.name)
+            if not b:
                 print(f"❌ Behavior not found: {args.name}")
                 return
+            behaviors = [b]
         else:
             behaviors = self.storage.behaviors.get_enabled_behaviors()
         if not behaviors:
@@ -635,8 +1065,15 @@ class AdaptivePreferenceCLI:
             return
         all_ok = True
         for b in behaviors:
+            # Baseline: artifact path must exist if set
+            if b.artifact_path:
+                p = Path(b.artifact_path).expanduser()
+                if not p.exists():
+                    print(f"  ✗ {b.name}: artifact file missing: {p}")
+                    all_ok = False
+                    continue
             if not b.verify_script:
-                print(f"  ○ {b.name}: no verify script")
+                print(f"  ○ {b.name}: no verify script (artifact present)")
                 continue
             result = subprocess.run(b.verify_script, shell=True, capture_output=True, text=True)
             if result.returncode == 0:
@@ -649,7 +1086,7 @@ class AdaptivePreferenceCLI:
                     print(f"    stderr: {result.stderr.strip()[:200]}")
                 all_ok = False
         if not all_ok:
-            import sys as _sys; _sys.exit(1)
+            import sys; sys.exit(1)
 
     def cmd_behavior_setup(self, args):
         """Run setup_script for each behavior (or the named one)."""
@@ -835,40 +1272,221 @@ Examples:
     template_apply.add_argument("template_name", help="Template name (see: adaptive-cli template list)")
 
     # behavior
-    behavior_parser = subparsers.add_parser("behavior", help="Manage automation behaviors")
+    behavior_parser = subparsers.add_parser(
+        "behavior",
+        help="Manage automation behaviors",
+        description=(
+            "Behaviors are named, versioned automation units — scripts that run on hooks,\n"
+            "respond to CI events, or automate repetitive workflows.\n\n"
+            "Subcommand quick reference:\n"
+            "  add       Interactive wizard (no args) or flag-based registration\n"
+            "  create    Scaffold a new behavior script with APE header, then edit it\n"
+            "  install   Register from an existing APE-annotated script file\n"
+            "  update    Re-read a behavior's script and sync its DB record\n"
+            "  list      Show all installed behaviors\n"
+            "  show      Show full details of one behavior\n"
+            "  toggle    Enable or disable without removing\n"
+            "  verify    Run verify scripts and check artifact existence\n"
+            "  setup     Run one-time setup scripts\n"
+            "  remove    Remove a behavior from the DB\n\n"
+            "Typical workflow:\n"
+            "  1. adaptive-cli behavior create        (scaffold + edit)\n"
+            "  2. adaptive-cli behavior install <path> (register)\n"
+            "  3. adaptive-cli behavior verify         (confirm healthy)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     behavior_sub = behavior_parser.add_subparsers(dest="behavior_subcommand")
 
-    behavior_sub.add_parser("list", help="List installed behaviors")
+    behavior_sub.add_parser(
+        "list",
+        help="List all installed behaviors",
+        description="Show all installed behaviors with their status, version, platform, and hook binding.",
+    )
 
-    beh_show = behavior_sub.add_parser("show", help="Show behavior details")
-    beh_show.add_argument("name")
+    beh_show = behavior_sub.add_parser(
+        "show",
+        help="Show full details of one behavior",
+        description="Display all fields of a behavior including dependencies, artifact path, and scripts.",
+    )
+    beh_show.add_argument("name", help="Behavior name")
 
-    beh_add = behavior_sub.add_parser("add", help="Register a behavior")
-    beh_add.add_argument("--name", required=True)
-    beh_add.add_argument("--version", default="1.0.0")
-    beh_add.add_argument("--description", default="")
-    beh_add.add_argument("--platform", default="any", choices=["any", "github", "gitlab", "bitbucket"])
-    beh_add.add_argument("--hook-event", default=None, dest="hook_event")
-    beh_add.add_argument("--hook-matcher", default=None, dest="hook_matcher")
-    beh_add.add_argument("--artifact-path", default=None, dest="artifact_path")
-    beh_add.add_argument("--setup-script", default=None, dest="setup_script")
-    beh_add.add_argument("--verify-script", default=None, dest="verify_script")
-    beh_add.add_argument("--pref-dep", action="append", default=None, dest="pref_dep")
+    beh_add = behavior_sub.add_parser(
+        "add",
+        help="Define and register a behavior (wizard or flags)",
+        description=(
+            "Register a behavior in the APE database.\n\n"
+            "Run with NO arguments to launch the interactive wizard — it walks you\n"
+            "through every field with prompts and smart defaults.\n\n"
+            "Run with --name and optional flags to skip the wizard entirely.\n"
+            "If you supply any flags without --name, the command fails with a hint.\n\n"
+            "Use 'behavior add' when:\n"
+            "  - You want a guided setup\n"
+            "  - The behavior script already exists and you just want to catalog it\n"
+            "  - You're registering a behavior without a file (e.g. a conceptual preference)\n\n"
+            "Use 'behavior install <path>' instead when the script has APE headers —\n"
+            "it reads all fields from the file automatically.\n\n"
+            "Examples:\n"
+            "  adaptive-cli behavior add                     # launch wizard\n"
+            "  adaptive-cli behavior add --name pr-monitor --platform github --hook-event PostToolUse --hook-matcher Bash"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    beh_add.add_argument("--name", default=None, help="Behavior name (slug: lowercase, hyphens)")
+    beh_add.add_argument("--version", default="1.0.0", help="Version string (default: 1.0.0)")
+    beh_add.add_argument("--description", default=None, help="Human-readable description")
+    beh_add.add_argument("--platform", default="any",
+                         choices=["any", "github", "gitlab", "bitbucket", "azure-devops", "gitea"],
+                         help="Target VCS platform (default: any)")
+    beh_add.add_argument("--hook-event", default=None, dest="hook_event",
+                         help="Claude Code hook event: PostToolUse, PreToolUse, SessionStart, Stop")
+    beh_add.add_argument("--hook-matcher", default=None, dest="hook_matcher",
+                         help="Tool name to match in hook event (e.g. Bash, Write)")
+    beh_add.add_argument("--artifact-path", default=None, dest="artifact_path",
+                         help="Path to the script file that implements this behavior")
+    beh_add.add_argument("--verify-script", default=None, dest="verify_script",
+                         help="Shell command to verify prerequisites (e.g. 'command -v gh >/dev/null 2>&1')")
+    beh_add.add_argument("--setup-script", default=None, dest="setup_script",
+                         help="Shell command to run once on install")
+    beh_add.add_argument("--pref-dep", action="append", default=None, dest="pref_dep",
+                         help="Preference path this behavior depends on (repeatable)")
 
-    beh_toggle = behavior_sub.add_parser("toggle", help="Enable or disable a behavior")
-    beh_toggle.add_argument("name")
+    beh_create = behavior_sub.add_parser(
+        "create",
+        help="Scaffold a new behavior script with APE header",
+        description=(
+            "Interactive wizard that scaffolds a new behavior script at the path you\n"
+            "specify (default: ~/.adaptive-cli/behaviors/<name>.sh).\n\n"
+            "The script is pre-populated with APE header comments that describe the\n"
+            "behavior's metadata. Edit the script to add your implementation, then\n"
+            "install it with 'behavior install <path>'.\n\n"
+            "Use 'behavior create' when:\n"
+            "  - You want to write a new behavior from scratch\n"
+            "  - You want the APE header format pre-filled for you\n\n"
+            "Use 'behavior add' instead if the script already exists or you don't\n"
+            "need a file (you're just cataloging a preference, not a script).\n\n"
+            "This command does NOT register the behavior in the DB. Run\n"
+            "'behavior install <path>' after editing to do that.\n\n"
+            "Examples:\n"
+            "  adaptive-cli behavior create\n"
+            "  adaptive-cli behavior create --force   # overwrite existing scaffold"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    beh_create.add_argument("--force", action="store_true",
+                            help="Overwrite an existing artifact file at the target path")
+
+    beh_install = behavior_sub.add_parser(
+        "install",
+        help="Register a behavior from an APE-annotated script file",
+        description=(
+            "Parse the APE-* header comments in a script file and register or\n"
+            "update the behavior in the APE database.\n\n"
+            "The script must contain at minimum:\n"
+            "  # APE-BEHAVIOR: <name>\n"
+            "  # APE-VERSION: <version>\n\n"
+            "These can appear anywhere in the comment block (lines starting with '#').\n"
+            "See 'behavior create' for the full header format.\n\n"
+            "Use 'behavior install' when:\n"
+            "  - You wrote or received a behavior script with APE headers\n"
+            "  - You ran 'behavior create' and finished editing the script\n"
+            "  - You moved a script from another machine and want to re-register it\n\n"
+            "Use 'behavior update <name>' instead if the behavior is already registered\n"
+            "and you just want to sync after editing.\n\n"
+            "Examples:\n"
+            "  adaptive-cli behavior install ~/.claude/pr-monitor.sh\n"
+            "  adaptive-cli behavior install ./my-behavior.sh --force"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    beh_install.add_argument("path", help="Path to the APE-annotated script file")
+    beh_install.add_argument("--force", action="store_true",
+                             help="Apply update without version-change confirmation prompt")
+    beh_install.add_argument("--non-interactive", action="store_true", dest="non_interactive",
+                             help="Fail instead of prompting if confirmation is needed (for scripts/CI)")
+
+    beh_update = behavior_sub.add_parser(
+        "update",
+        help="Re-read a behavior's artifact file and sync its DB record",
+        description=(
+            "Re-reads the APE header from the behavior's registered artifact file\n"
+            "and updates the DB record to match.\n\n"
+            "Use 'behavior update' when:\n"
+            "  - You edited a behavior script directly and want to sync the DB\n"
+            "  - You know the behavior name but don't remember the file path\n\n"
+            "Use 'behavior install <path>' instead if the file moved or you have\n"
+            "the path handy.\n\n"
+            "Examples:\n"
+            "  adaptive-cli behavior update pr-monitor\n"
+            "  adaptive-cli behavior update pr-monitor --force"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    beh_update.add_argument("name", help="Behavior name")
+    beh_update.add_argument("--force", action="store_true",
+                            help="Apply update without version-change confirmation")
+    beh_update.add_argument("--non-interactive", action="store_true", dest="non_interactive",
+                            help="Fail instead of prompting (for scripts/CI)")
+
+    beh_toggle = behavior_sub.add_parser(
+        "toggle",
+        help="Enable or disable a behavior without removing it",
+        description=(
+            "Toggle the enabled flag on a behavior. Disabled behaviors are excluded\n"
+            "from 'behavior verify', 'behavior setup', and hook dispatchers.\n\n"
+            "Examples:\n"
+            "  adaptive-cli behavior toggle pr-monitor --enable\n"
+            "  adaptive-cli behavior toggle pr-monitor --disable"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    beh_toggle.add_argument("name", help="Behavior name")
     toggle_group = beh_toggle.add_mutually_exclusive_group(required=True)
-    toggle_group.add_argument("--enable", action="store_true")
-    toggle_group.add_argument("--disable", dest="enable", action="store_false")
+    toggle_group.add_argument("--enable", dest="enable", action="store_true", help="Enable the behavior")
+    toggle_group.add_argument("--disable", dest="enable", action="store_false", help="Disable the behavior")
 
-    beh_remove = behavior_sub.add_parser("remove", help="Remove a behavior")
-    beh_remove.add_argument("name")
+    beh_remove = behavior_sub.add_parser(
+        "remove",
+        help="Remove a behavior from the database",
+        description=(
+            "Removes a behavior's DB record. Does NOT delete the artifact file.\n"
+            "The artifact path is printed so you can clean it up manually if needed.\n\n"
+            "Examples:\n"
+            "  adaptive-cli behavior remove pr-monitor"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    beh_remove.add_argument("name", help="Behavior name")
 
-    beh_verify = behavior_sub.add_parser("verify", help="Verify behavior health")
-    beh_verify.add_argument("--name", default=None)
+    beh_verify = behavior_sub.add_parser(
+        "verify",
+        help="Check that behavior artifacts exist and prerequisites are met",
+        description=(
+            "For each enabled behavior (or the named one), runs the verify_script\n"
+            "and checks that the artifact file exists.\n\n"
+            "Exit code 0 = all pass. Exit code 1 = one or more failures.\n\n"
+            "Examples:\n"
+            "  adaptive-cli behavior verify             # verify all enabled behaviors\n"
+            "  adaptive-cli behavior verify --name pr-monitor"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    beh_verify.add_argument("--name", default=None, help="Verify only this behavior")
 
-    beh_setup = behavior_sub.add_parser("setup", help="Run setup scripts")
-    beh_setup.add_argument("--name", default=None)
+    beh_setup = behavior_sub.add_parser(
+        "setup",
+        help="Run one-time setup scripts for behaviors",
+        description=(
+            "Runs the setup_script for each behavior (or the named one) that has one.\n"
+            "Intended for first-time installation: installing system dependencies,\n"
+            "configuring credentials, etc.\n\n"
+            "Examples:\n"
+            "  adaptive-cli behavior setup              # run setup for all behaviors\n"
+            "  adaptive-cli behavior setup --name pr-monitor"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    beh_setup.add_argument("--name", default=None, help="Set up only this behavior")
 
     parser.add_argument(
         "--base-dir",
@@ -958,6 +1576,12 @@ Examples:
                 cli.cmd_behavior_show(args)
             elif args.behavior_subcommand == "add":
                 cli.cmd_behavior_add(args)
+            elif args.behavior_subcommand == "create":
+                cli.cmd_behavior_create(args)
+            elif args.behavior_subcommand == "install":
+                cli.cmd_behavior_install(args)
+            elif args.behavior_subcommand == "update":
+                cli.cmd_behavior_update(args)
             elif args.behavior_subcommand == "toggle":
                 cli.cmd_behavior_toggle(args)
             elif args.behavior_subcommand == "remove":
