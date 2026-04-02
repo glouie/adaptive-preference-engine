@@ -31,6 +31,7 @@ from scripts.models import (
     Association, ContextStack,
     Preference, Signal,
 )
+from scripts.behaviors import BehaviorStorage, BEHAVIOR_SCHEMA
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS preferences (
@@ -465,7 +466,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    _CURRENT_VERSION = 1
+    _CURRENT_VERSION = 2
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
@@ -489,6 +490,7 @@ class PreferenceStorageManager:
         self.associations = AssociationStorage(self._conn)
         self.contexts     = ContextStorage(self._conn)
         self.signals      = SignalStorage(self._conn)
+        self.behaviors    = BehaviorStorage(self._conn)
 
     def _apply_migrations(self) -> None:
         """Ensure schema_version reflects the current version. Runs pending migrations."""
@@ -497,14 +499,22 @@ class PreferenceStorageManager:
         ).fetchone()
         current = row[0] if row[0] is not None else 0
 
-        if current < self._CURRENT_VERSION:
+        if current < 1:
             # Version 1: initial SQLite schema (preferences, associations, contexts, signals)
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                    (self._CURRENT_VERSION, datetime.now().isoformat()),
+                    (1, datetime.now().isoformat()),
                 )
-            print(f"  [storage] Applied migration: schema v{self._CURRENT_VERSION}")
+
+        if current < 2:
+            # v2: behavior tables
+            self._conn.executescript(BEHAVIOR_SCHEMA)
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (2, datetime.now().isoformat()),
+                )
 
     def get_storage_info(self) -> Dict[str, Any]:
         return {
@@ -521,6 +531,9 @@ class PreferenceStorageManager:
             ).fetchone()[0],
             "signals_count": self._conn.execute(
                 "SELECT COUNT(*) FROM signals"
+            ).fetchone()[0],
+            "behaviors_count": self._conn.execute(
+                "SELECT COUNT(*) FROM behaviors"
             ).fetchone()[0],
         }
 
@@ -588,7 +601,10 @@ class PreferenceStorageManager:
     def reset(self) -> None:
         """Wipe all rows from every table (schema stays intact)."""
         with self._conn:
-            for table in ("preferences", "associations", "contexts", "signals"):
+            for table in (
+                "behavior_behavior_deps", "behavior_pref_deps", "behaviors",
+                "preferences", "associations", "contexts", "signals",
+            ):
                 self._conn.execute(f"DELETE FROM {table}")
 
     def close(self) -> None:
