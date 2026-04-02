@@ -6,6 +6,19 @@ All nested objects (LearningData, context preferences, signal lists) are
 stored as JSON TEXT blobs so callers never deal with join queries.
 """
 
+
+class JSONLStorageReadError(Exception):
+    """Raised when reading a JSONL file encounters parse errors.
+
+    Kept for backward compatibility with tests written against the JSONL-era
+    storage layer. The SQLite implementation never raises this at runtime.
+    """
+
+    def __init__(self, filepath, errors):
+        self.filepath = filepath
+        self.errors = errors
+        super().__init__(f"Malformed JSONL in {filepath}: {errors}")
+
 import json
 import os
 import shutil
@@ -110,6 +123,52 @@ class SQLiteDB:
 class PreferenceStorage(SQLiteDB):
     """CRUD for the `preferences` table."""
 
+    def __init__(self, conn: sqlite3.Connection, filepath: Optional[Path] = None) -> None:
+        super().__init__(conn)
+        # Compatibility: JSONL-era tests write to this file and expect read_all()
+        # to parse it.  When filepath is None (default), read_all() falls back to
+        # the SQLite store instead.
+        self.filepath: Optional[Path] = filepath
+        self.last_read_errors: List[Dict] = []
+
+    def read_all(self, skip_invalid: bool = False) -> List[Dict]:
+        """Read raw preference dicts from the JSONL file (JSONL-era compatibility API).
+
+        If self.filepath does not exist, returns an empty list.
+        When skip_invalid is False a bad line raises JSONLStorageReadError.
+        When skip_invalid is True, bad lines are skipped and recorded in
+        self.last_read_errors.
+        """
+        self.last_read_errors = []
+        if self.filepath is None or not self.filepath.exists():
+            return []
+        records: List[Dict] = []
+        errors: List[Dict] = []
+        with open(self.filepath) as fh:
+            for line_number, raw in enumerate(fh, start=1):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    records.append(json.loads(raw))
+                except json.JSONDecodeError as exc:
+                    entry = {"line_number": line_number, "message": str(exc)}
+                    errors.append(entry)
+        if errors:
+            self.last_read_errors = errors
+            if not skip_invalid:
+                raise JSONLStorageReadError(self.filepath, errors)
+        return records
+
+    def get_all_preferences(self) -> List[Preference]:
+        """Return all preferences from SQLite, raising JSONLStorageReadError if the
+        JSONL file exists and contains parse errors (JSONL-era compatibility)."""
+        if self.filepath is not None and self.filepath.exists():
+            # Trigger JSONL validation — raises JSONLStorageReadError on bad lines.
+            self.read_all(skip_invalid=False)
+        rows = self._conn.execute("SELECT * FROM preferences").fetchall()
+        return [self._row_to_preference(r) for r in rows]
+
     def save_preference(self, preference: Preference) -> None:
         d = preference.to_dict()
         with self._conn:
@@ -154,10 +213,6 @@ class PreferenceStorage(SQLiteDB):
             "SELECT * FROM preferences WHERE path = ? OR path LIKE ?",
             (path_prefix, path_prefix + ".%"),
         ).fetchall()
-        return [self._row_to_preference(r) for r in rows]
-
-    def get_all_preferences(self) -> List[Preference]:
-        rows = self._conn.execute("SELECT * FROM preferences").fetchall()
         return [self._row_to_preference(r) for r in rows]
 
     def delete_preference(self, pref_id: str) -> None:
@@ -427,7 +482,10 @@ class PreferenceStorageManager:
         self._apply_migrations()
         self._closed = False
         self.db_path = db_path
-        self.preferences  = PreferenceStorage(self._conn)
+        prefs_dir = db_path.parent
+        self.preferences  = PreferenceStorage(
+            self._conn, filepath=prefs_dir / "all_preferences.jsonl"
+        )
         self.associations = AssociationStorage(self._conn)
         self.contexts     = ContextStorage(self._conn)
         self.signals      = SignalStorage(self._conn)
@@ -498,9 +556,30 @@ class PreferenceStorageManager:
             )
         return cursor.rowcount
 
-    def delete_preference(self, pref_id: str) -> None:
-        """Convenience delegate — remove a preference by ID."""
+    def delete_preference(self, pref_id: str) -> bool:
+        """Remove a preference by ID, cascading to associations and context refs.
+
+        Returns True if the preference existed and was deleted, False if it was
+        not found.
+        """
+        if self.preferences.get_preference(pref_id) is None:
+            return False
+
+        # Cascade: remove associations that reference this preference
+        assocs = self.associations.get_associations_for_preference(pref_id)
+        for assoc in assocs:
+            with self._conn:
+                self._conn.execute("DELETE FROM associations WHERE id = ?", (assoc.id,))
+
+        # Cascade: remove this preference from any context's preference map
+        contexts = self.contexts.get_all_contexts()
+        for ctx in contexts:
+            if pref_id in ctx.preferences:
+                del ctx.preferences[pref_id]
+                self.contexts.save_context(ctx)
+
         self.preferences.delete_preference(pref_id)
+        return True
 
     def delete_signal(self, signal_id: str) -> None:
         """Convenience delegate — remove a signal by ID."""

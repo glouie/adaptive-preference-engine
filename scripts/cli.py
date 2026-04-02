@@ -60,6 +60,26 @@ class AdaptivePreferenceCLI:
         print(f"   Path: {pref.path}")
         print(f"   Type: {pref.type}")
     
+    def cmd_update_preference(self, args):
+        """Update an existing preference's value, description, or confidence."""
+        pref = self.storage.preferences.get_preference(args.pref_id)
+
+        if not pref:
+            print(f"❌ Preference not found: {args.pref_id}")
+            return
+
+        if args.value is not None:
+            pref.value = args.value
+        if args.description is not None:
+            pref.description = args.description
+        if args.confidence is not None:
+            pref.confidence = args.confidence
+
+        from datetime import datetime as _dt
+        pref.last_updated = _dt.now().isoformat()
+        self.storage.preferences.save_preference(pref)
+        print(f"✅ Updated preference: {pref.name}")
+
     def cmd_show_preference(self, args):
         """Display a preference and its metadata"""
         pref = self.storage.preferences.get_preference(args.pref_id)
@@ -217,12 +237,19 @@ class AdaptivePreferenceCLI:
             user_corrected_to=args.corrected,
             user_message=args.message or ""
         )
-        
+
         print(f"✅ Recorded correction signal")
         print(f"   Task: {args.task}")
         print(f"   Proposed: {args.proposed} → Corrected: {args.corrected}")
         print(f"   Emotion: {signal.emotional_tone}")
         print(f"   Associations updated: {len(signal.associations_affected)}")
+
+        # Show what the system learned from this correction
+        corrected_pref = self.storage.preferences.get_preference(args.corrected)
+        if corrected_pref:
+            print(f"\nWhat I learned:")
+            print(f"   You prefer: {corrected_pref.path}")
+            print(f"   Confidence: {corrected_pref.confidence:.0%}")
     
     def cmd_signal_feedback(self, args):
         """Process a feedback signal"""

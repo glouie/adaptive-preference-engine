@@ -14,6 +14,27 @@ from typing import Dict, List, Any
 #     (id will be generated at apply time; created/last_updated auto-set)
 
 TEMPLATES: Dict[str, Dict[str, Any]] = {
+    "DEVELOPER": {
+        "name": "Developer",
+        "description": "Balanced developer preferences: type hints, testing, docstrings, code style, communication",
+        "preferences": [
+            {"path": "coding.style.type_hints", "name": "type_hints",
+             "type": "variant", "value": "always",
+             "description": "Always include type annotations on function signatures"},
+            {"path": "coding.style.docstrings", "name": "docstrings",
+             "type": "variant", "value": "google",
+             "description": "Use Google-style docstrings"},
+            {"path": "coding.testing.framework", "name": "test_framework",
+             "type": "variant", "value": "pytest",
+             "description": "Use pytest for all test files"},
+            {"path": "coding.style.line_length", "name": "line_length",
+             "type": "property", "value": "88",
+             "description": "Max line length (Black default)"},
+            {"path": "communication.output_format.structure", "name": "structure",
+             "type": "variant", "value": "headers",
+             "description": "Use markdown headers to structure long responses"},
+        ],
+    },
     "python-developer": {
         "name": "Python Developer",
         "description": "Common preferences for Python development: type hints, docstrings, test style",
