@@ -68,33 +68,33 @@ def migrate(base_dir: str, dry_run: bool = False) -> None:
         print("[dry-run] No changes written.")
         return
 
-    mgr = PreferenceStorageManager(base_dir)
+    with PreferenceStorageManager(base_dir) as mgr:
+        for d in data["preferences"]:
+            try:
+                mgr.preferences.save_preference(Preference.from_dict(d))
+            except Exception as e:
+                print(f"  ⚠  preference {d.get('id')}: {e}")
 
-    for d in data["preferences"]:
-        try:
-            mgr.preferences.save_preference(Preference.from_dict(d))
-        except Exception as e:
-            print(f"  ⚠  preference {d.get('id')}: {e}")
+        for d in data["associations"]:
+            try:
+                mgr.associations.save_association(Association.from_dict(d))
+            except Exception as e:
+                print(f"  ⚠  association {d.get('id')}: {e}")
 
-    for d in data["associations"]:
-        try:
-            mgr.associations.save_association(Association.from_dict(d))
-        except Exception as e:
-            print(f"  ⚠  association {d.get('id')}: {e}")
+        for d in data["contexts"]:
+            try:
+                mgr.contexts.save_context(ContextStack.from_dict(d))
+            except Exception as e:
+                print(f"  ⚠  context {d.get('id')}: {e}")
 
-    for d in data["contexts"]:
-        try:
-            mgr.contexts.save_context(ContextStack.from_dict(d))
-        except Exception as e:
-            print(f"  ⚠  context {d.get('id')}: {e}")
+        for d in data["signals"]:
+            try:
+                mgr.signals.save_signal(Signal.from_dict(d))
+            except Exception as e:
+                print(f"  ⚠  signal {d.get('id')}: {e}")
 
-    for d in data["signals"]:
-        try:
-            mgr.signals.save_signal(Signal.from_dict(d))
-        except Exception as e:
-            print(f"  ⚠  signal {d.get('id')}: {e}")
+        info = mgr.get_storage_info()
 
-    info = mgr.get_storage_info()
     print(f"✅ Migration complete → adaptive.db")
     print(f"   preferences:  {info['preferences_count']}")
     print(f"   associations: {info['associations_count']}")
