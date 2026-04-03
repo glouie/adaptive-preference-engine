@@ -38,6 +38,42 @@ layout. The short version is:
 - [docs](./docs): architecture, implementation, and historical iteration docs
 - [reviews](./reviews): local review artifacts; delegated-review snapshots are kept ignored locally
 
+## Cross-Machine Sync
+
+Preferences, signals, and Claude Code config travel between machines via a private git repo.
+
+**First-time setup (any machine):**
+
+```bash
+# 1. Clone this repo and install
+git clone <this-repo-url>
+cd adaptive-preference-engine
+pip install -e . --break-system-packages
+
+# 2. Clone your personal sync repo (a private git repo you own)
+git clone <your-sync-repo-url> ~/github/your-sync-repo
+
+# 3. Point APE at it
+adaptive-cli sync configure --repo-path ~/github/your-sync-repo
+
+# 4. Pull everything down
+adaptive-cli sync pull
+```
+
+`sync pull` restores:
+- All learned preferences and signals (SQLite)
+- `~/.claude/settings.json` (statusline, hooks, Claude Code config)
+- `~/.claude/statusline-ape.sh` (the statusline script)
+- `~/.claude/agents/` definitions
+
+**Pushing updates:**
+
+```bash
+adaptive-cli sync push
+```
+
+Run this after any session where preferences changed or Claude Code config was updated.
+
 ## Notes
 
 - This repo is actively evolving from a script-bundle shape toward a cleaner
