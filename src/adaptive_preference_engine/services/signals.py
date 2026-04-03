@@ -9,6 +9,7 @@ from adaptive_preference_engine.models import Signal, Association, AssociationLe
 from adaptive_preference_engine.paths import get_base_dir
 from adaptive_preference_engine.storage import PreferenceStorageManager
 from adaptive_preference_engine.services.habits import HabitTracker
+from scripts.bayesian_strength_calculator import BayesianStrengthCalculator
 import json
 import logging
 
@@ -122,9 +123,10 @@ class FrictionMetrics:
 
 class SignalProcessor:
     """Process behavioral signals to update preferences and associations"""
-    
+
     def __init__(self, storage_manager: PreferenceStorageManager):
         self.storage = storage_manager
+        self._bayesian_calc = BayesianStrengthCalculator()
 
     def _create_metrics_tracker(self) -> FrictionMetrics:
         """Create a metrics tracker scoped to this storage manager."""
@@ -513,35 +515,24 @@ class SignalProcessor:
     
     def _calculate_strength(self, learning: AssociationLearning) -> float:
         """
-        Calculate association strength from learning data.
-        Formula: frequency × trend × emotion × recency
+        Calculate association strength from learning data using Bayesian inference.
+
+        Delegates to BayesianStrengthCalculator which models strength as a
+        posterior: P(preference|evidence) ∝ P(freq) × P(satisfaction) × P(trend),
+        then applies a separate recency decay.  This replaces the old ad-hoc
+        multiplicative formula (frequency × trend_mult × emotion_mult × recency_mult).
         """
-        
-        # Frequency (use count)
-        frequency_score = min(learning.use_count / 50, 1.0)  # Saturate at 50
-        
-        # Trend multiplier
-        trend_map = {
-            "strongly_increasing": 1.15,
-            "increasing": 1.05,
-            "stable": 1.0,
-            "decreasing": 0.85,
-            "strongly_decreasing": 0.7
-        }
-        trend_multiplier = trend_map.get(learning.trend, 1.0)
-        
-        # Emotion (satisfaction)
-        emotion_multiplier = 0.5 + (learning.satisfaction_rate * 0.5)  # 0.5 to 1.0
-        
-        # Recency (time decay)
         days_unused = (datetime.now() -
                        datetime.fromisoformat(learning.last_used)).days
-        recency_multiplier = 0.98 ** days_unused  # 2% decay per day
-        
-        # Combine
-        strength = frequency_score * trend_multiplier * emotion_multiplier * recency_multiplier
-        
-        return min(strength, 1.0)  # Cap at 1.0
+
+        calc = BayesianStrengthCalculator()
+        result = calc.calculate_strength_bayesian(
+            use_count=learning.use_count,
+            satisfaction_rate=learning.satisfaction_rate,
+            trend=learning.trend,
+            recency_days_unused=float(days_unused),
+        )
+        return result["strength"]
 
 
 class StrengthCalculator:
