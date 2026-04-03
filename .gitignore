@@ -5,3 +5,21 @@ build/
 *.egg-info/
 **/__pycache__/
 .pytest_cache/
+
+# Generated/experimental artifacts not part of the project
+docs/ITERATION*_EVALUATION/
+docs/superpowers/
+IMPLEMENTATION_NOTES.md
+IMPLEMENTATION_SUMMARY.txt
+ONBOARDING_GUIDE.md
+QUERY_INDEX_GUIDE.md
+QUERY_INDEX_README.md
+README_ONBOARDING.txt
+compact
+package-lock.json
+plugins/
+scripts/install_codex_skill.py
+scripts/query_index_examples.py
+.agents/
+.remember/
+.codex/
