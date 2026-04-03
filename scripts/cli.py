@@ -307,15 +307,14 @@ class AdaptivePreferenceCLI:
             stack_contexts=args.stack
         )
 
-        # Track last context so PreCompact hook can re-inject it
-        last_ctx_path = Path(self.storage.base_dir) / "last_context.txt"
-        last_ctx_path.write_text(" ".join(args.context), encoding="utf-8")
-
         if args.output:
             with open(args.output, 'w') as f:
                 f.write(agent_json)
             print(f"✅ Wrote agent context to {args.output}")
         else:
+            # Track last context so PreCompact hook can re-inject it (interactive sessions only)
+            last_ctx_path = Path(self.storage.base_dir) / "last_context.txt"
+            last_ctx_path.write_text(" ".join(args.context), encoding="utf-8")
             print(agent_json)
 
     def cmd_registry(self, args):
@@ -327,10 +326,17 @@ class AdaptivePreferenceCLI:
         """
         all_prefs = self.storage.preferences.get_all_preferences()
 
-        context_nodes = sorted(
-            {p.path.split(".")[1] for p in all_prefs if p.path.startswith("context.")}
-        )
-        pref_paths = sorted({p.path for p in all_prefs})
+        context_nodes: set = set()
+        pref_paths: set = set()
+        for p in all_prefs:
+            pref_paths.add(p.path)
+            if p.path.startswith("context."):
+                parts = p.path.split(".")
+                if len(parts) > 1:
+                    context_nodes.add(parts[1])
+
+        context_nodes = sorted(context_nodes)
+        pref_paths = sorted(pref_paths)
 
         registry = {
             "context_nodes": context_nodes,

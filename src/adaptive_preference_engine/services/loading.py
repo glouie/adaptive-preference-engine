@@ -178,25 +178,26 @@ class PreferenceLoader:
         4. Default to first preference found
         """
         
-        # Try to find preference matching context tags
         all_prefs = self.storage.preferences.get_all_preferences()
+        tags_lower = [t.lower() for t in context_tags]
 
-        # First: try exact context node match (context.<tag> path)
-        for tag in context_tags:
-            for pref in all_prefs:
-                if pref.path.lower() == f"context.{tag.lower()}":
-                    return pref.id
+        # Single pass: exact context node > substring > selector fallback
+        substring_match: Optional[str] = None
+        selector_fallback: Optional[str] = None
 
-        # Second: tag appears anywhere in the path
-        for tag in context_tags:
-            for pref in all_prefs:
-                if tag.lower() in pref.path.lower():
-                    return pref.id
-        
-        # Default: return first selector preference
         for pref in all_prefs:
-            if pref.type == "selector":
-                return pref.id
+            path_lower = pref.path.lower()
+
+            if any(path_lower == f"context.{tag}" for tag in tags_lower):
+                return pref.id  # highest priority — early exit
+
+            if substring_match is None and any(tag in path_lower for tag in tags_lower):
+                substring_match = pref.id
+
+            if selector_fallback is None and pref.type == "selector":
+                selector_fallback = pref.id
+
+        return substring_match or selector_fallback
         
         return None
     
