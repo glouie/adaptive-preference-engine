@@ -301,24 +301,46 @@ class AdaptivePreferenceCLI:
     
     def cmd_agent_context(self, args):
         """Generate context JSON for agent"""
-        loaded = self.loader.load_for_context(
-            context_tags=args.context,
-            primary_pref_id=args.primary,
-            stack_contexts=args.stack
-        )
-        
         agent_json = self.loader.load_for_agent(
             context_tags=args.context,
             primary_pref_id=args.primary,
             stack_contexts=args.stack
         )
-        
+
+        # Track last context so PreCompact hook can re-inject it
+        last_ctx_path = Path(self.storage.base_dir) / "last_context.txt"
+        last_ctx_path.write_text(" ".join(args.context), encoding="utf-8")
+
         if args.output:
             with open(args.output, 'w') as f:
                 f.write(agent_json)
             print(f"✅ Wrote agent context to {args.output}")
         else:
             print(agent_json)
+
+    def cmd_registry(self, args):
+        """Emit a compact session-start registry (~30 tokens).
+
+        Lists all known preference paths and top-level context nodes so
+        Claude knows what to ask for on demand — without loading full
+        preference trees up front.
+        """
+        all_prefs = self.storage.preferences.get_all_preferences()
+
+        context_nodes = sorted(
+            {p.path.split(".")[1] for p in all_prefs if p.path.startswith("context.")}
+        )
+        pref_paths = sorted({p.path for p in all_prefs})
+
+        registry = {
+            "context_nodes": context_nodes,
+            "preference_paths": pref_paths,
+            "hint": (
+                "Call `adaptive-cli agent-context --context <tag>` before any "
+                "produce/summarize/explain task to load relevant preferences."
+            ),
+        }
+        print(json.dumps(registry, indent=2))
     
     # ---- Maintenance ----
     
@@ -1194,6 +1216,9 @@ Examples:
     agent_parser.add_argument("--primary", default=None)
     agent_parser.add_argument("--stack", nargs="+", default=None)
     agent_parser.add_argument("--output", default=None)
+
+    # Registry (compact session-start payload)
+    subparsers.add_parser("registry", help="Emit compact preference registry for session start")
     
     # Maintenance commands
     stats_parser = subparsers.add_parser("stats", help="Show statistics")
@@ -1491,6 +1516,9 @@ Examples:
         
         elif args.command == "agent-context":
             cli.cmd_agent_context(args)
+
+        elif args.command == "registry":
+            cli.cmd_registry(args)
         
         elif args.command == "stats":
             cli.cmd_show_stats(args)

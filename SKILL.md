@@ -28,21 +28,37 @@ The engine stores preferences as JSONL files at `~/.adaptive-cli/`. It learns fr
 
 ---
 
-## Startup: Load Preferences
+## Startup: Two-Phase Preference Loading
 
-At the start of each session or before a substantive task, run:
+### Phase 1 — Session start (automatic, via hook)
+
+A `SessionStart` hook runs `adaptive-cli registry` and injects a compact payload (~30 tokens) listing
+all known preference paths and context nodes. This gives Claude a map of what is available without
+loading full preference trees up front.
+
+### Phase 2 — On-demand pre-task load (standing instruction)
+
+**Before any produce, summarize, or explain task**, silently run:
 
 ```bash
-cd ~/.adaptive-cli && python <skill-scripts-path>/cli.py agent-context --context <detected_context>
+adaptive-cli agent-context --context <inferred-context>
 ```
 
-Where `<detected_context>` is inferred from the task — e.g., `python`, `writing`, `api_design`, `code_review`.
+Where `<inferred-context>` is one or more tags inferred from the task — e.g., `python`, `writing`,
+`api_design`, `code_review`. This writes `~/.adaptive-cli/last_context.txt` so the PreCompact hook
+can re-inject the same context when compaction is triggered.
 
 If no stored preferences exist yet, skip gracefully. The engine will start learning from this session.
 
 **Apply what you load:** If preferences indicate `communication.output_format.table` at high confidence,
 use tables. If `communication.depth.detailed` is preferred, be thorough. Let the loaded preferences
 silently shape your response style.
+
+### Compact preservation
+
+A `PreCompact` hook re-runs `agent-context` for the last known context and injects both the preferences
+and this standing instruction into the compacted summary — so preferences survive compaction without
+manual re-loading.
 
 ---
 

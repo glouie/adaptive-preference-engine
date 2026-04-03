@@ -15,8 +15,8 @@ class PreferenceLoader:
     
     def __init__(self, storage_manager: PreferenceStorageManager):
         self.storage = storage_manager
-        self.confidence_threshold = 0.45  # Stop loading when confidence drops below this
-        self.max_association_depth = 3    # Max levels to follow
+        self.confidence_threshold = 0.45  # Stop loading when effective confidence drops below this
+        self.max_hops = 20                # Hard cap — guards against cycles in deeply connected graphs
     
     def load_for_context(self, 
                         context_tags: List[str],
@@ -47,7 +47,7 @@ class PreferenceLoader:
             "context_stack": [],
             "strength_metadata": {
                 "confidence_threshold": self.confidence_threshold,
-                "max_depth": self.max_association_depth,
+                "max_hops": self.max_hops,
                 "loaded_at": datetime.now().isoformat()
             }
         }
@@ -88,13 +88,13 @@ class PreferenceLoader:
         
         # STEP 3: Follow associations with diminishing confidence
         visited = {primary_pref_id}
-        to_explore = [(primary_pref_id, 0, 1.0)]  # (pref_id, depth, confidence)
-        
+        to_explore = [(primary_pref_id, 0, 1.0)]  # (pref_id, hops, confidence)
+
         while to_explore:
-            current_id, current_depth, current_confidence = to_explore.pop(0)
-            
+            current_id, current_hops, current_confidence = to_explore.pop(0)
+
             # Stop conditions
-            if current_depth >= self.max_association_depth:
+            if current_hops >= self.max_hops:
                 continue
             if current_confidence < self.confidence_threshold:
                 continue
@@ -134,7 +134,7 @@ class PreferenceLoader:
                             "id": next_id,
                             "path": next_pref.path,
                             "value": next_pref.value,
-                            "depth": current_depth + 1,
+                            "hops": current_hops + 1,
                             "confidence": round(next_confidence, 3),
                             "association_id": assoc.id,
                             "association_strength": round(direction_strength, 3),
@@ -144,9 +144,9 @@ class PreferenceLoader:
                         if include_trees:
                             associated_entry["preferences"] = self._load_preference_tree(next_id)
                         loaded["associated"].append(associated_entry)
-                        
+
                         visited.add(next_id)
-                        to_explore.append((next_id, current_depth + 1, next_confidence))
+                        to_explore.append((next_id, current_hops + 1, next_confidence))
         
         # Sort associated preferences by confidence (highest first)
         loaded["associated"] = sorted(
@@ -180,7 +180,14 @@ class PreferenceLoader:
         
         # Try to find preference matching context tags
         all_prefs = self.storage.preferences.get_all_preferences()
-        
+
+        # First: try exact context node match (context.<tag> path)
+        for tag in context_tags:
+            for pref in all_prefs:
+                if pref.path.lower() == f"context.{tag.lower()}":
+                    return pref.id
+
+        # Second: tag appears anywhere in the path
         for tag in context_tags:
             for pref in all_prefs:
                 if tag.lower() in pref.path.lower():
