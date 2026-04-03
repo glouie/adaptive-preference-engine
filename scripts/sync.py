@@ -195,6 +195,40 @@ class SyncRunner:
             return f"Sync repo not configured or not found: {self.repo}"
         return _git(["status", "--short"], cwd=self.repo)
 
+    def pending_counts(self) -> Dict[str, int]:
+        """
+        Compare SQLite row counts to JSONL line counts in the repo.
+        Returns dict of {table: N} where N > 0 means that many records
+        not yet reflected in the repo's JSONL.
+        Returns empty dict if repo doesn't exist or has no JSONL files.
+        """
+        if not self.repo.exists():
+            return {}
+
+        conn = self.mgr._conn
+        sqlite_counts = {
+            "preferences":  conn.execute("SELECT COUNT(*) FROM preferences").fetchone()[0],
+            "associations": conn.execute("SELECT COUNT(*) FROM associations").fetchone()[0],
+            "contexts":     conn.execute("SELECT COUNT(*) FROM contexts").fetchone()[0],
+            "signals":      conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0],
+        }
+
+        file_map = {
+            "preferences":  "all_preferences.jsonl",
+            "associations": "associations.jsonl",
+            "contexts":     "contexts.jsonl",
+            "signals":      "signals.jsonl",
+        }
+
+        pending: Dict[str, int] = {}
+        for table, filename in file_map.items():
+            path = self.repo / filename
+            repo_count = len(_read_jsonl(path))
+            diff = sqlite_counts[table] - repo_count
+            if diff > 0:
+                pending[table] = diff
+        return pending
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
