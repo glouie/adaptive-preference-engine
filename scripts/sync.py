@@ -205,12 +205,12 @@ class SyncRunner:
         if not self.repo.exists():
             return {}
 
-        conn = self.mgr._conn
+        info = self.mgr.get_storage_info()
         sqlite_counts = {
-            "preferences":  conn.execute("SELECT COUNT(*) FROM preferences").fetchone()[0],
-            "associations": conn.execute("SELECT COUNT(*) FROM associations").fetchone()[0],
-            "contexts":     conn.execute("SELECT COUNT(*) FROM contexts").fetchone()[0],
-            "signals":      conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0],
+            "preferences":  info["preferences_count"],
+            "associations": info["associations_count"],
+            "contexts":     info["contexts_count"],
+            "signals":      info["signals_count"],
         }
 
         file_map = {
