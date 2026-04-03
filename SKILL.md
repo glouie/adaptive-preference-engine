@@ -9,7 +9,7 @@ description: >
   matters. This skill should run in the background on virtually every interaction.
 ---
 
-# Adaptive Preference Engine
+# 🦧 Adaptive Preference Engine
 
 This skill connects Claude to a behavior-driven preference learning system. It watches how the user
 interacts, learns from corrections and feedback, and builds a growing model of what they actually prefer.
