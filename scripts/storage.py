@@ -21,11 +21,11 @@ class JSONLStorageReadError(Exception):
 
 import json
 import os
-import shutil
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from scripts.models import (
     Association, ContextStack,
@@ -107,6 +107,57 @@ CREATE TABLE IF NOT EXISTS schema_version (
 """
 
 
+class _LockedConnection:
+    """
+    Thin proxy around a sqlite3.Connection that serialises all access via a
+    threading.RLock. RLock (not Lock) is required because the `with self._conn:`
+    transaction pattern acquires the lock in __enter__, then calls execute()
+    inside the block — which would deadlock on a plain Lock.
+
+    Lock scope covers execute, commit, and the transaction boundary (__enter__/
+    __exit__) so that no thread can execute or commit while another is mid-
+    transaction. backup() also holds the lock for its full duration.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock) -> None:  # lock: threading.RLock instance
+        self._conn = conn
+        self._lock = lock
+
+    def execute(self, sql: str, params=()) -> sqlite3.Cursor:
+        with self._lock:
+            return self._conn.execute(sql, params)
+
+    def executescript(self, sql: str) -> sqlite3.Cursor:
+        with self._lock:
+            return self._conn.executescript(sql)
+
+    def executemany(self, sql: str, params) -> sqlite3.Cursor:
+        with self._lock:
+            return self._conn.executemany(sql, params)
+
+    def commit(self) -> None:
+        with self._lock:
+            self._conn.commit()
+
+    def backup(self, target) -> None:
+        with self._lock:
+            self._conn.backup(target)
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> "_LockedConnection":
+        self._lock.acquire()
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        try:
+            self._conn.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._lock.release()
+
+
 class SQLiteDB:
     """
     Base class: holds a reference to a shared SQLite connection.
@@ -117,14 +168,14 @@ class SQLiteDB:
     concurrently.
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: Union[_LockedConnection, sqlite3.Connection]) -> None:
         self._conn = conn
 
 
 class PreferenceStorage(SQLiteDB):
     """CRUD for the `preferences` table."""
 
-    def __init__(self, conn: sqlite3.Connection, filepath: Optional[Path] = None) -> None:
+    def __init__(self, conn: Union[_LockedConnection, sqlite3.Connection], filepath: Optional[Path] = None) -> None:
         super().__init__(conn)
         # Compatibility: JSONL-era tests write to this file and expect read_all()
         # to parse it.  When filepath is None (default), read_all() falls back to
@@ -474,8 +525,10 @@ class PreferenceStorageManager:
         self.base_dir = Path(base_dir)
         db_path = self.base_dir / "preferences" / "adaptive.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
+        _raw_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        _raw_conn.row_factory = sqlite3.Row
+        self._conn = _LockedConnection(_raw_conn, self._lock)
         self._conn.executescript(_SCHEMA)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
