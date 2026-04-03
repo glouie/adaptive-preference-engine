@@ -522,6 +522,9 @@ class PreferenceStorageManager:
             "signals_count": self._conn.execute(
                 "SELECT COUNT(*) FROM signals"
             ).fetchone()[0],
+            "behaviors_count": self._conn.execute(
+                "SELECT COUNT(*) FROM behaviors"
+            ).fetchone()[0],
         }
 
     def backup(self, backup_name: Optional[str] = None) -> str:

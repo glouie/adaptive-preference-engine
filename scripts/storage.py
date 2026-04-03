@@ -146,9 +146,19 @@ class _LockedConnection:
     def close(self) -> None:
         self._conn.close()
 
+    def __getattr__(self, name: str):
+        # Proxy any attribute not explicitly defined above to the underlying
+        # connection (e.g. row_factory, isolation_level, in_transaction).
+        # This prevents AttributeError on legitimate sqlite3.Connection attrs.
+        return getattr(self._conn, name)
+
     def __enter__(self) -> "_LockedConnection":
         self._lock.acquire()
-        self._conn.__enter__()
+        try:
+            self._conn.__enter__()
+        except Exception:
+            self._lock.release()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -594,6 +604,9 @@ class PreferenceStorageManager:
         """Back up the live database using SQLite's online backup API."""
         if backup_name is None:
             backup_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Reject names that could escape the backups directory
+        if "/" in backup_name or "\\" in backup_name or ".." in backup_name:
+            raise ValueError(f"Invalid backup_name (must not contain path separators or '..'): {backup_name!r}")
         backup_dir = self.base_dir / "backups" / backup_name
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup_path = backup_dir / "adaptive.db"
@@ -620,7 +633,8 @@ class PreferenceStorageManager:
             cursor = self._conn.execute(
                 "DELETE FROM signals WHERE timestamp < ?", (cutoff,)
             )
-        return cursor.rowcount
+            rowcount = cursor.rowcount
+        return rowcount
 
     def delete_preference(self, pref_id: str) -> bool:
         """Remove a preference by ID, cascading to associations and context refs.
@@ -653,11 +667,13 @@ class PreferenceStorageManager:
 
     def reset(self) -> None:
         """Wipe all rows from every table (schema stays intact)."""
+        _RESET_TABLES = frozenset({
+            "behavior_behavior_deps", "behavior_pref_deps", "behaviors",
+            "preferences", "associations", "contexts", "signals",
+        })
         with self._conn:
-            for table in (
-                "behavior_behavior_deps", "behavior_pref_deps", "behaviors",
-                "preferences", "associations", "contexts", "signals",
-            ):
+            for table in _RESET_TABLES:
+                assert table in _RESET_TABLES  # belt-and-suspenders: only allowlisted names
                 self._conn.execute(f"DELETE FROM {table}")
 
     def close(self) -> None:
