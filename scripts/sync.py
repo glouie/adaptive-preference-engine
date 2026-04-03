@@ -25,7 +25,7 @@ from scripts.models import Association, ContextStack, Preference, Signal
 from scripts.storage import PreferenceStorageManager
 
 # ~/.claude/ files synced by push/pull (filenames only, no subdirs)
-_CLAUDE_SYNC_SCRIPTS = ["statusline-ape.sh"]
+_CLAUDE_SYNC_SCRIPTS = ["statusline-ape.sh", "settings.json"]
 
 
 class PreferenceSync:
