@@ -23,6 +23,10 @@ adaptive-cli stats            # Engine statistics
 adaptive-cli decay            # Apply time-decay to stale prefs
 adaptive-cli recalculate      # Recalculate all preference strengths
 adaptive-cli reset            # Wipe all preferences
+adaptive-cli buddy install    # Install ape-buddy agent to ~/.claude/agents/
+adaptive-cli buddy enable     # Delegate APE ops to buddy (isolates from main context)
+adaptive-cli buddy disable    # Revert to direct CLI calls
+adaptive-cli buddy status     # Show install and enable state
 ```
 
 Without `pip install -e .`, use: `python -m scripts.cli <command>` from project root.
@@ -38,6 +42,7 @@ Without `pip install -e .`, use: `python -m scripts.cli <command>` from project 
 ```
 SKILL.md                        # Claude Code skill definition (auto-loads prefs, records signals)
 agents/
+  ape-buddy.md                  # Specialist agent: handles all APE ops in isolation
   signal-auditor.md             # Audit signal quality
   preference-health-checker.md  # Detect stale/conflicting preferences
   drift-detector.md             # Find shifting preferences over time

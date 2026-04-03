@@ -28,6 +28,24 @@ The engine stores preferences as JSONL files at `~/.adaptive-cli/`. It learns fr
 
 ---
 
+## APE Buddy (Context Isolation)
+
+If `adaptive-cli buddy status` returns `enabled`, delegate **all** APE operations to the
+`ape-buddy` agent instead of running CLI commands directly. This keeps preference bookkeeping
+out of the main context window.
+
+**How to delegate:**
+
+```
+Agent(subagent_type="ape-buddy", prompt="load python api_design")
+Agent(subagent_type="ape-buddy", prompt="record_correction task=api_design context=python proposed=bullets corrected=table message='tables work better here'", run_in_background=True)
+```
+
+**What the buddy returns:** a single summary line — apply it silently.
+**When buddy is disabled:** fall through to the direct CLI instructions below.
+
+---
+
 ## Startup: Two-Phase Preference Loading
 
 ### Phase 1 — Session start (automatic, via hook)

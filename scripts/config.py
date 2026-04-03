@@ -30,6 +30,15 @@ class AdaptiveConfig:
         self._data["sync_repo_path"] = value
         self._save()
 
+    @property
+    def buddy_enabled(self) -> bool:
+        return bool(self._data.get("buddy_enabled", False))
+
+    @buddy_enabled.setter
+    def buddy_enabled(self, value: bool) -> None:
+        self._data["buddy_enabled"] = value
+        self._save()
+
     def _load(self) -> dict:
         if self._path.exists():
             try:

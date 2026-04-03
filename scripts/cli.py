@@ -1073,6 +1073,56 @@ class AdaptivePreferenceCLI:
         if not all_ok:
             import sys; sys.exit(1)
 
+    # ---- Buddy Management ----
+
+    def cmd_buddy_install(self, args):
+        """Copy the ape-buddy agent definition to ~/.claude/agents/ and ~/.adaptive-cli/agents/."""
+        import shutil
+        agent_src = Path(__file__).parent.parent / "agents" / "ape-buddy.md"
+        if not agent_src.exists():
+            print(f"❌ Agent file not found: {agent_src}")
+            print("   Re-clone the APE repo or run: git pull")
+            return
+
+        local_agents = Path(self.storage.base_dir) / "agents"
+        claude_agents = Path.home() / ".claude" / "agents"
+        local_agents.mkdir(parents=True, exist_ok=True)
+        claude_agents.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy2(agent_src, local_agents / "ape-buddy.md")
+        shutil.copy2(agent_src, claude_agents / "ape-buddy.md")
+        print(f"✅ Installed: ~/.claude/agents/ape-buddy.md")
+        print(f"   Enable with: adaptive-cli buddy enable")
+
+    def cmd_buddy_enable(self, args):
+        """Enable the buddy — APE operations will be delegated to the ape-buddy agent."""
+        installed = (Path.home() / ".claude" / "agents" / "ape-buddy.md").exists()
+        if not installed:
+            print("⚠️  ape-buddy is not installed yet.")
+            print("   Run: adaptive-cli buddy install")
+            return
+        cfg = AdaptiveConfig(str(self.storage.base_dir))
+        cfg.buddy_enabled = True
+        print("✅ APE buddy enabled — active from next session start.")
+
+    def cmd_buddy_disable(self, args):
+        """Disable the buddy — APE operations revert to direct CLI calls."""
+        cfg = AdaptiveConfig(str(self.storage.base_dir))
+        cfg.buddy_enabled = False
+        print("✅ APE buddy disabled.")
+
+    def cmd_buddy_status(self, args):
+        """Show buddy install and enable state."""
+        cfg = AdaptiveConfig(str(self.storage.base_dir))
+        installed = (Path.home() / ".claude" / "agents" / "ape-buddy.md").exists()
+        state = "enabled" if cfg.buddy_enabled else "disabled"
+        print(f"Buddy: {state}")
+        print(f"Installed: {'yes  (~/.claude/agents/ape-buddy.md)' if installed else 'no'}")
+        if not installed:
+            print("  Run: adaptive-cli buddy install")
+        elif not cfg.buddy_enabled:
+            print("  Run: adaptive-cli buddy enable")
+
     def cmd_behavior_setup(self, args):
         """Run setup_script for each behavior (or the named one)."""
         import subprocess
@@ -1477,6 +1527,30 @@ Examples:
     )
     beh_setup.add_argument("--name", default=None, help="Set up only this behavior")
 
+    # buddy
+    buddy_parser = subparsers.add_parser(
+        "buddy",
+        help="Manage the APE Buddy agent",
+        description=(
+            "The APE Buddy is a specialist agent that handles all preference\n"
+            "bookkeeping in its own context window, keeping the main agent clean.\n\n"
+            "Subcommands:\n"
+            "  install   Copy ape-buddy.md to ~/.claude/agents/ (and local managed copy)\n"
+            "  enable    Delegate APE operations to the buddy agent\n"
+            "  disable   Revert to direct adaptive-cli calls in the main context\n"
+            "  status    Show install and enable state\n\n"
+            "New machine setup:\n"
+            "  adaptive-cli sync pull   # restores prefs + buddy agent in one step\n"
+            "  adaptive-cli buddy enable"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    buddy_sub = buddy_parser.add_subparsers(dest="buddy_subcommand")
+    buddy_sub.add_parser("install", help="Install ape-buddy to ~/.claude/agents/")
+    buddy_sub.add_parser("enable", help="Enable buddy delegation")
+    buddy_sub.add_parser("disable", help="Disable buddy delegation")
+    buddy_sub.add_parser("status", help="Show buddy state")
+
     parser.add_argument(
         "--base-dir",
         default=None,
@@ -1560,6 +1634,18 @@ Examples:
                 cli.cmd_template_apply(args)
             else:
                 template_parser.print_help()
+
+        elif args.command == "buddy":
+            if args.buddy_subcommand == "install":
+                cli.cmd_buddy_install(args)
+            elif args.buddy_subcommand == "enable":
+                cli.cmd_buddy_enable(args)
+            elif args.buddy_subcommand == "disable":
+                cli.cmd_buddy_disable(args)
+            elif args.buddy_subcommand == "status":
+                cli.cmd_buddy_status(args)
+            else:
+                buddy_parser.print_help()
 
         elif args.command == "behavior":
             if args.behavior_subcommand == "list":

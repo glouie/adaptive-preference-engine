@@ -15,6 +15,7 @@ the old storage format, so the files are human-readable and git-diffable.
 
 import json
 import os
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -130,13 +131,23 @@ class SyncRunner:
 
         counts = PreferenceSync.export(self.mgr, self.repo)
 
+        # Export agent definitions from ~/.adaptive-cli/agents/ if any exist
+        local_agents = Path(os.path.expanduser("~/.adaptive-cli/agents"))
+        if local_agents.exists():
+            repo_agents = self.repo / "agents"
+            repo_agents.mkdir(exist_ok=True)
+            for f in local_agents.glob("*.md"):
+                shutil.copy2(f, repo_agents / f.name)
+
         status = _git(["status", "--porcelain"], cwd=self.repo)
         if not status.strip():
             return {"status": "up-to-date", "counts": counts}
 
-        _git(["add",
-              "all_preferences.jsonl", "associations.jsonl",
-              "contexts.jsonl", "signals.jsonl"], cwd=self.repo)
+        git_add = ["all_preferences.jsonl", "associations.jsonl",
+                   "contexts.jsonl", "signals.jsonl"]
+        if (self.repo / "agents").exists():
+            git_add.append("agents/")
+        _git(["add"] + git_add, cwd=self.repo)
 
         msg = f"sync: export preferences {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         _git(["commit", "-m", msg], cwd=self.repo)
@@ -160,6 +171,19 @@ class SyncRunner:
         except RuntimeError as e:
             git_pull_error = str(e)
         counts = PreferenceSync.import_from(self.mgr, self.repo)
+
+        # Restore agent definitions to ~/.adaptive-cli/agents/ and ~/.claude/agents/
+        repo_agents = self.repo / "agents"
+        if repo_agents.exists():
+            local_agents = Path(os.path.expanduser("~/.adaptive-cli/agents"))
+            claude_agents = Path.home() / ".claude" / "agents"
+            local_agents.mkdir(parents=True, exist_ok=True)
+            claude_agents.mkdir(parents=True, exist_ok=True)
+            for f in repo_agents.glob("*.md"):
+                shutil.copy2(f, local_agents / f.name)
+                shutil.copy2(f, claude_agents / f.name)
+            counts["agents"] = len(list(repo_agents.glob("*.md")))
+
         result: Dict = {"status": "pulled", "counts": counts}
         if git_pull_error:
             result["git_pull_error"] = git_pull_error
