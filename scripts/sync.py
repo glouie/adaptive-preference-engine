@@ -24,6 +24,9 @@ from typing import Dict
 from scripts.models import Association, ContextStack, Preference, Signal
 from scripts.storage import PreferenceStorageManager
 
+# ~/.claude/ files synced by push/pull (filenames only, no subdirs)
+_CLAUDE_SYNC_SCRIPTS = ["statusline-ape.sh"]
+
 
 class PreferenceSync:
     """Static helpers for export/import. Git operations in SyncRunner."""
@@ -140,6 +143,15 @@ class SyncRunner:
             for f in local_agents.glob("*.md"):
                 shutil.copy2(f, repo_agents / f.name)
 
+        # Export ~/.claude/ scripts (statusline, etc.)
+        claude_dir = Path.home() / ".claude"
+        repo_scripts = self.repo / "claude_scripts"
+        for src in _CLAUDE_SYNC_SCRIPTS:
+            f = claude_dir / src
+            if f.exists():
+                repo_scripts.mkdir(exist_ok=True)
+                shutil.copy2(f, repo_scripts / f.name)
+
         status = _git(["status", "--porcelain"], cwd=self.repo)
         if not status.strip():
             return {"status": "up-to-date", "counts": counts}
@@ -148,6 +160,8 @@ class SyncRunner:
                    "contexts.jsonl", "signals.jsonl"]
         if (self.repo / "agents").exists():
             git_add.append("agents/")
+        if (self.repo / "claude_scripts").exists():
+            git_add.append("claude_scripts/")
         _git(["add"] + git_add, cwd=self.repo)
 
         msg = f"sync: export preferences {datetime.now().strftime('%Y-%m-%d %H:%M')}"
@@ -210,6 +224,20 @@ class SyncRunner:
                 shutil.copy2(f, claude_agents / safe_name)
                 installed += 1
             counts["agents"] = installed
+
+        # Restore ~/.claude/ scripts
+        repo_scripts = self.repo / "claude_scripts"
+        if repo_scripts.exists():
+            claude_dir = Path.home() / ".claude"
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            restored = 0
+            for name in _CLAUDE_SYNC_SCRIPTS:
+                src = repo_scripts / name
+                if src.exists() and not src.is_symlink():
+                    shutil.copy2(src, claude_dir / name)
+                    restored += 1
+            if restored:
+                counts["claude_scripts"] = restored
 
         result: Dict = {"status": "pulled", "counts": counts}
         if git_pull_error:
