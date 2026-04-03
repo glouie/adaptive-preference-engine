@@ -1,0 +1,7 @@
+.worktrees/
+# Local delegated review artifacts
+reviews/delegated-review-*/
+build/
+*.egg-info/
+**/__pycache__/
+.pytest_cache/
