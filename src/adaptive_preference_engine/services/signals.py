@@ -522,8 +522,10 @@ class SignalProcessor:
         then applies a separate recency decay.  This replaces the old ad-hoc
         multiplicative formula (frequency × trend_mult × emotion_mult × recency_mult).
         """
-        days_unused = (datetime.now() -
-                       datetime.fromisoformat(learning.last_used)).days
+        days_unused = (
+            (datetime.now() - datetime.fromisoformat(learning.last_used)).days
+            if learning.last_used else 0
+        )
 
         calc = BayesianStrengthCalculator()
         result = calc.calculate_strength_bayesian(

@@ -36,7 +36,10 @@ class BayesianStrengthCalculator:
         # Sigmoid parameters
         k = 0.1  # Steepness
         inflection = 20  # Inflection point (where likelihood = 0.5)
-        
+
+        # Guard against corrupt imported data: use_count must be non-negative
+        use_count = max(0, use_count)
+
         # Sigmoid scaling
         sigmoid = 1.0 / (1.0 + math.exp(-k * (use_count - inflection)))
         

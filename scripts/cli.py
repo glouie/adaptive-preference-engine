@@ -1037,6 +1037,7 @@ class AdaptivePreferenceCLI:
     def cmd_behavior_verify(self, args):
         """Run verify_script for each enabled behavior (or the named one)."""
         import subprocess
+        import shlex
         if args.name:
             b = self.storage.behaviors.get_behavior_by_name(args.name)
             if not b:
@@ -1060,7 +1061,7 @@ class AdaptivePreferenceCLI:
             if not b.verify_script:
                 print(f"  ○ {b.name}: no verify script (artifact present)")
                 continue
-            result = subprocess.run(b.verify_script, shell=True, capture_output=True, text=True)
+            result = subprocess.run(shlex.split(b.verify_script), shell=False, capture_output=True, text=True)
             if result.returncode == 0:
                 print(f"  ✓ {b.name}: ok")
             else:
@@ -1126,6 +1127,7 @@ class AdaptivePreferenceCLI:
     def cmd_behavior_setup(self, args):
         """Run setup_script for each behavior (or the named one)."""
         import subprocess
+        import shlex
         if args.name:
             b = self.storage.behaviors.get_behavior_by_name(args.name)
             if not b:
@@ -1141,8 +1143,13 @@ class AdaptivePreferenceCLI:
             if not b.setup_script:
                 print(f"  ○ {b.name}: no setup script")
                 continue
+            print(f"  ⚙ {b.name}: setup script: {b.setup_script}")
+            confirm = input("    Run this script? [y/N] ").strip().lower()
+            if confirm != "y":
+                print(f"  ○ {b.name}: skipped")
+                continue
             print(f"  ⚙ {b.name}: running setup...")
-            result = subprocess.run(b.setup_script, shell=True, capture_output=True, text=True)
+            result = subprocess.run(shlex.split(b.setup_script), shell=False, capture_output=True, text=True)
             if result.returncode == 0:
                 print(f"  ✓ {b.name}: setup complete")
             else:

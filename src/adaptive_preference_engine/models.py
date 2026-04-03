@@ -3,11 +3,17 @@ models.py - Core data models for adaptive preference engine
 Defines Preference, Association, Context, Signal classes
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dc_fields
 from typing import Dict, List, Optional, Literal
 from datetime import datetime
 import json
 import uuid
+
+
+def _filter_fields(cls, data: dict) -> dict:
+    """Return only keys that are declared fields on the dataclass cls."""
+    known = {f.name for f in dc_fields(cls)}
+    return {k: v for k, v in data.items() if k in known}
 
 
 @dataclass
@@ -69,8 +75,8 @@ class Preference:
     @staticmethod
     def from_dict(data):
         data = dict(data)
-        learning_data = LearningData(**data.pop("learning", {}))
-        return Preference(**data, learning=learning_data)
+        learning_data = LearningData(**_filter_fields(LearningData, data.pop("learning", {})))
+        return Preference(**_filter_fields(Preference, data), learning=learning_data)
 
 
 @dataclass
@@ -129,9 +135,9 @@ class Association:
     @staticmethod
     def from_dict(data):
         data = dict(data)
-        learning_forward = AssociationLearning(**data.pop("learning_forward", {}))
-        learning_backward = AssociationLearning(**data.pop("learning_backward", {}))
-        return Association(**data, learning_forward=learning_forward, learning_backward=learning_backward)
+        learning_forward = AssociationLearning(**_filter_fields(AssociationLearning, data.pop("learning_forward", {})))
+        learning_backward = AssociationLearning(**_filter_fields(AssociationLearning, data.pop("learning_backward", {})))
+        return Association(**_filter_fields(Association, data), learning_forward=learning_forward, learning_backward=learning_backward)
     
     def get_strength_for_direction(self, from_id: str) -> float:
         """Get strength based on traversal direction"""
@@ -169,7 +175,7 @@ class ContextStack:
     
     @staticmethod
     def from_dict(data):
-        return ContextStack(**data)
+        return ContextStack(**_filter_fields(ContextStack, data))
 
 
 @dataclass
@@ -215,7 +221,7 @@ class Signal:
     
     @staticmethod
     def from_dict(data):
-        return Signal(**data)
+        return Signal(**_filter_fields(Signal, data))
 
 
 # Utility functions

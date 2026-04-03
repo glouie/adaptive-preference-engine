@@ -61,8 +61,9 @@ class PreferenceSync:
     def import_from(mgr: PreferenceStorageManager, src_dir: Path) -> Dict[str, int]:
         """
         Upsert JSONL files from src_dir into local SQLite.
-        Idempotent — running twice produces no duplicates.
-        Returns counts of records imported per table.
+        Idempotent — running twice produces no duplicates (uses INSERT OR REPLACE).
+        Returns upsert-call counts per table (not insert counts — existing records
+        that are re-imported still increment the count).
         """
         src_dir = Path(src_dir)
         counts: Dict[str, int] = {"preferences": 0, "associations": 0, "contexts": 0, "signals": 0}
@@ -170,6 +171,18 @@ class SyncRunner:
             _git(["pull"], cwd=self.repo)
         except RuntimeError as e:
             git_pull_error = str(e)
+            # Abort if the repo is in a conflicted state — importing from
+            # conflict-marked JSONL would silently corrupt data.
+            conflict_status = _git_safe(["status", "--porcelain"], cwd=self.repo)
+            if conflict_status and any(
+                line[:2] in ("AA", "UU", "DD", "AU", "UA", "DU", "UD")
+                for line in conflict_status.splitlines()
+            ):
+                return {
+                    "status": "conflict",
+                    "git_pull_error": git_pull_error,
+                    "counts": {},
+                }
         counts = PreferenceSync.import_from(self.mgr, self.repo)
 
         # Restore agent definitions to ~/.adaptive-cli/agents/ and ~/.claude/agents/
@@ -179,10 +192,24 @@ class SyncRunner:
             claude_agents = Path.home() / ".claude" / "agents"
             local_agents.mkdir(parents=True, exist_ok=True)
             claude_agents.mkdir(parents=True, exist_ok=True)
+            installed = 0
             for f in repo_agents.glob("*.md"):
-                shutil.copy2(f, local_agents / f.name)
-                shutil.copy2(f, claude_agents / f.name)
-            counts["agents"] = len(list(repo_agents.glob("*.md")))
+                # Reject symlinks and names with path separators to prevent traversal
+                if f.is_symlink():
+                    print(f"  WARNING: Skipping symlink in agents/: {f.name}")
+                    continue
+                real = f.resolve()
+                if not str(real).startswith(str(repo_agents.resolve())):
+                    print(f"  WARNING: Skipping out-of-tree agent file: {f.name}")
+                    continue
+                safe_name = f.name
+                if "/" in safe_name or "\\" in safe_name or ".." in safe_name:
+                    print(f"  WARNING: Skipping unsafe agent filename: {safe_name}")
+                    continue
+                shutil.copy2(f, local_agents / safe_name)
+                shutil.copy2(f, claude_agents / safe_name)
+                installed += 1
+            counts["agents"] = installed
 
         result: Dict = {"status": "pulled", "counts": counts}
         if git_pull_error:
@@ -198,9 +225,13 @@ class SyncRunner:
     def pending_counts(self) -> Dict[str, int]:
         """
         Compare SQLite row counts to JSONL line counts in the repo.
-        Returns dict of {table: N} where N > 0 means that many records
-        not yet reflected in the repo's JSONL.
-        Returns empty dict if repo doesn't exist or has no JSONL files.
+
+        Returns dict of {table: N} where:
+          N > 0 — SQLite has that many records not yet reflected in the repo JSONL (push needed)
+          N < 0 — JSONL has that many records not in SQLite (e.g. after a reset; pull would re-import them)
+
+        Only tables with a non-zero diff are included. Returns empty dict if repo
+        doesn't exist or all counts match.
         """
         if not self.repo.exists():
             return {}
@@ -225,7 +256,7 @@ class SyncRunner:
             path = self.repo / filename
             repo_count = len(_read_jsonl(path))
             diff = sqlite_counts[table] - repo_count
-            if diff > 0:
+            if diff != 0:
                 pending[table] = diff
         return pending
 
@@ -235,10 +266,14 @@ class SyncRunner:
 def _write_jsonl(path: Path, records: list) -> None:
     """Write list of dicts as JSONL (atomic via tmp file)."""
     tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _read_jsonl(path: Path) -> list:
@@ -269,3 +304,14 @@ def _git(args: list, cwd: Path) -> str:
             f"git {' '.join(args)} failed:\n{result.stderr.strip()}"
         )
     return result.stdout
+
+
+def _git_safe(args: list, cwd: Path) -> str:
+    """Run a git command in cwd. Returns empty string on non-zero exit (no raise)."""
+    result = subprocess.run(
+        ["git"] + args,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout if result.returncode == 0 else ""
