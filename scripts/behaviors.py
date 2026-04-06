@@ -1,5 +1,6 @@
 """behaviors.py - Behavior storage for APE."""
 
+import inspect
 import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -108,7 +109,8 @@ class Behavior:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Behavior":
-        return cls(**{k: v for k, v in d.items() if k in cls.__init__.__code__.co_varnames})
+        valid_params = set(inspect.signature(cls.__init__).parameters.keys()) - {'self'}
+        return cls(**{k: v for k, v in d.items() if k in valid_params})
 
 
 class BehaviorStorage:
