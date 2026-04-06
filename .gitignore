@@ -1,4 +1,5 @@
 .worktrees/
+.git-pull*.log
 # Local delegated review artifacts
 reviews/delegated-review-*/
 build/

@@ -3,12 +3,8 @@ bayesian_strength_calculator.py - Proper Bayesian strength calculation
 Addresses Dr. Michael Wong (ML) critical gap: "Strength formula is mathematically broken"
 """
 
-import sys
-from pathlib import Path
 from typing import Dict, Tuple
 import math
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 
 class BayesianStrengthCalculator:
