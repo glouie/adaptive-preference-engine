@@ -527,7 +527,7 @@ class SignalProcessor:
             if learning.last_used else 0
         )
 
-        calc = BayesianStrengthCalculator()
+        calc = self._bayesian_calc
         result = calc.calculate_strength_bayesian(
             use_count=learning.use_count,
             satisfaction_rate=learning.satisfaction_rate,
