@@ -198,8 +198,6 @@ class PreferenceLoader:
                 selector_fallback = pref.id
 
         return substring_match or selector_fallback
-        
-        return None
     
     def _load_preference_tree(self, pref_id: str) -> Dict[str, Any]:
         """
