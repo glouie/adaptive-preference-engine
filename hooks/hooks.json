@@ -1,32 +1,34 @@
-[
-  {
-    "event": "SessionStart",
-    "hooks": [
+{
+  "description": "Adaptive Preference Engine hooks — session start registry and preference signal detection",
+  "hooks": {
+    "SessionStart": [
       {
-        "type": "command",
-        "command": "$CLAUDE_PLUGIN_ROOT/scripts/session-start-hook.sh"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/scripts/session-start-hook.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "The adaptive preference engine is active. It learns your preferences by observing corrections and feedback — not by asking. When the user corrects your approach (e.g., 'actually use X not Y', 'I prefer tables here', 'no, do it this way'), silently record it by running: python3 $CLAUDE_PLUGIN_ROOT/scripts/cli.py signal correction --task <task_context> --context <language_or_project> --proposed <what_you_did> --corrected <what_user_wanted> --message '<user_quote>'. When the user gives positive feedback (e.g., 'perfect!', 'exactly', 'yes that's right'), record it by running: python3 $CLAUDE_PLUGIN_ROOT/scripts/cli.py signal feedback --task <task_context> --context <language_or_project> --preferences <pref_path> --response '<user_quote>' --satisfaction 0.9. Do this silently. Never mention the preference engine to the user unless they ask about it."
+          }
+        ]
       }
-    ]
-  },
-  {
-    "event": "SessionStart",
-    "hooks": [
+    ],
+    "PostToolUse": [
       {
-        "type": "prompt",
-        "prompt": "The adaptive preference engine is active. It learns your preferences by observing corrections and feedback — not by asking. When the user corrects your approach (e.g., 'actually use X not Y', 'I prefer tables here', 'no, do it this way'), silently record it by running: python3 $CLAUDE_PLUGIN_ROOT/scripts/cli.py signal correction --task <task_context> --context <language_or_project> --proposed <what_you_did> --corrected <what_user_wanted> --message '<user_quote>'. When the user gives positive feedback (e.g., 'perfect!', 'exactly', 'yes that's right'), record it by running: python3 $CLAUDE_PLUGIN_ROOT/scripts/cli.py signal feedback --task <task_context> --context <language_or_project> --preferences <pref_path> --response '<user_quote>' --satisfaction 0.9. Do this silently. Never mention the preference engine to the user unless they ask about it."
-      }
-    ]
-  },
-  {
-    "event": "PostToolUse",
-    "matcher": {
-      "toolName": "Edit|Write"
-    },
-    "hooks": [
-      {
-        "type": "prompt",
-        "prompt": "A file was just written or edited. Briefly consider: did the user correct your approach, express a strong preference, or make a non-obvious style/format decision in the conversation leading to this edit? If so, silently record it as a correction or feedback signal using python3 $CLAUDE_PLUGIN_ROOT/scripts/cli.py. Only record genuinely new preferences — not routine edits or obvious decisions."
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "A file was just written or edited. Briefly consider: did the user correct your approach, express a strong preference, or make a non-obvious style/format decision in the conversation leading to this edit? If so, silently record it as a correction or feedback signal using python3 $CLAUDE_PLUGIN_ROOT/scripts/cli.py. Only record genuinely new preferences — not routine edits or obvious decisions."
+          }
+        ]
       }
     ]
   }
-]
+}

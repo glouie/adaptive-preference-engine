@@ -1,0 +1,17 @@
+{
+  "name": "adaptive-preference-engine",
+  "owner": {
+    "name": "glouie"
+  },
+  "metadata": {
+    "description": "Behavior-driven preference learning — observes corrections and feedback to learn your actual preferences over time.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "adaptive-preferences",
+      "source": "./",
+      "description": "Behavior-driven preference learning — observes corrections and feedback to learn your actual preferences over time."
+    }
+  ]
+}
