@@ -12,6 +12,7 @@ from adaptive_preference_engine.services.habits import HabitTracker
 from scripts.bayesian_strength_calculator import BayesianStrengthCalculator
 import json
 import logging
+import re
 
 
 class FrictionMetrics:
@@ -357,10 +358,10 @@ class SignalProcessor:
         
         text_lower = text.lower()
         
-        positive_count = sum(1 for indicator in self.POSITIVE_INDICATORS 
-                            if indicator in text_lower)
-        negative_count = sum(1 for indicator in self.NEGATIVE_INDICATORS 
-                            if indicator in text_lower)
+        positive_count = sum(1 for indicator in self.POSITIVE_INDICATORS
+                            if re.search(r'\b' + re.escape(indicator) + r'\b', text_lower))
+        negative_count = sum(1 for indicator in self.NEGATIVE_INDICATORS
+                            if re.search(r'\b' + re.escape(indicator) + r'\b', text_lower))
         
         if positive_count > negative_count:
             return "satisfied"
@@ -378,7 +379,7 @@ class SignalProcessor:
         indicators = []
         
         for indicator in self.POSITIVE_INDICATORS + self.NEGATIVE_INDICATORS:
-            if indicator in text_lower:
+            if re.search(r'\b' + re.escape(indicator) + r'\b', text_lower):
                 indicators.append(indicator)
         
         return list(set(indicators))  # Remove duplicates
