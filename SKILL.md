@@ -20,7 +20,7 @@ interacts, learns from corrections and feedback, and builds a growing model of w
 
 ## How This Skill Works
 
-The engine stores preferences as JSONL files at `~/.adaptive-cli/`. It learns from three signal types:
+The engine stores preferences in a SQLite database at `~/.adaptive-cli/preferences/adaptive.db`. It learns from three signal types:
 
 1. **Corrections** — user says "actually use X not Y" → strongest learning signal
 2. **Feedback** — user says "perfect!" or "not quite" → emotional signal
@@ -157,28 +157,29 @@ All preference data lives at:
 ```
 ~/.adaptive-cli/
 ├── preferences/
-│   ├── all_preferences.jsonl
-│   ├── associations.jsonl
-│   ├── contexts.jsonl
-│   └── signals.jsonl
+│   └── adaptive.db          # SQLite database (WAL mode enabled)
 └── backups/
 ```
 
-Human-readable JSONL format — no database required. Persists across all Claude sessions.
+**Storage format:** SQLite with Write-Ahead Logging (WAL mode) for concurrent read/write safety. The database contains tables for preferences, associations, contexts, and signals. JSONL files are still used for cross-machine sync exports (via `adaptive-cli export`) but are no longer the primary storage format. Persists across all Claude sessions.
 
 ---
 
 ## Strength Evolution
 
-Preference strengths update automatically:
+Preference strengths update automatically using **Bayesian posterior inference**:
 
 ```
-strength = frequency × trend × emotion × recency
+P(preference|evidence) ∝ P(freq) × P(satisfaction) × P(trend)
 ```
 
-- **Time decay**: 2% per day unused (stale preferences fade)
-- **Trend detection**: repeated corrections in same direction → multiplier boost
-- **Emotional boost**: "perfect!" feedback increases confidence significantly
+Components:
+- **Frequency likelihood**: Sigmoid function of use count (avoids oversaturation)
+- **Satisfaction likelihood**: Linear scaling from user feedback (0.5-1.0 range)
+- **Trend likelihood**: Evidence quality from trend direction (strongly_increasing = 0.95, decreasing = 0.30)
+- **Recency decay**: Applied separately as confidence modifier (2% per day unused)
+
+The Bayesian approach provides proper probabilistic reasoning instead of ad-hoc multiplication. See `scripts/bayesian_strength_calculator.py` for implementation details.
 
 Run periodically to maintain the engine:
 
