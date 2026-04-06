@@ -1,9 +1,10 @@
 # Adaptive Preference Engine
 
 Adaptive Preference Engine is a local preference-learning runtime for AI-assisted
-workflows. It records corrections and feedback, stores learned preferences as
-JSONL data, and exposes a CLI plus thin Claude/Codex adapters that read and
-write to the same shared preference store.
+workflows. It records corrections and feedback, stores learned preferences in a
+local SQLite database, and exposes a CLI plus thin Claude/Codex adapters that
+read and write to the same shared preference store. JSONL exports are used for
+cross-machine sync via git.
 
 ## Current Status
 
