@@ -1216,7 +1216,13 @@ Examples:
     
     list_pref = pref_sub.add_parser("list", help="List preferences")
     list_pref.add_argument("--path", default=None, help="Filter by path prefix")
-    
+
+    update_pref = pref_sub.add_parser("update", help="Update a preference")
+    update_pref.add_argument("pref_id", help="Preference ID to update")
+    update_pref.add_argument("--value", default=None, help="New value")
+    update_pref.add_argument("--description", default=None, help="New description")
+    update_pref.add_argument("--confidence", type=float, default=None, help="New confidence (0.0-1.0)")
+
     # Association commands
     assoc_parser = subparsers.add_parser("assoc", help="Manage associations")
     assoc_sub = assoc_parser.add_subparsers(dest="subcommand")
@@ -1577,7 +1583,9 @@ Examples:
                 cli.cmd_show_preference(args)
             elif args.subcommand == "list":
                 cli.cmd_list_preferences(args)
-        
+            elif args.subcommand == "update":
+                cli.cmd_update_preference(args)
+
         elif args.command == "assoc":
             if args.subcommand == "create":
                 cli.cmd_create_association(args)
