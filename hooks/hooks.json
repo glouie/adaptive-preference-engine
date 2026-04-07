@@ -24,8 +24,17 @@
         "matcher": "Edit|Write",
         "hooks": [
           {
+            "type": "command",
+            "command": "python3 $CLAUDE_PLUGIN_ROOT/scripts/posttool-signal-detector.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
             "type": "prompt",
-            "prompt": "A file was just written or edited. Briefly consider: did the user correct your approach, express a strong preference, or make a non-obvious style/format decision in the conversation leading to this edit? If so, silently record it as a correction or feedback signal using python3 $CLAUDE_PLUGIN_ROOT/scripts/cli.py. Only record genuinely new preferences — not routine edits or obvious decisions."
+            "prompt": "A file was just written or edited. Check the user's most recent message. If it contains ANY of these signals, you MUST record it by running the CLI command — do not dismiss it as routine:\n\n1. CORRECTION: User said 'no', 'don't', 'stop', 'wrong', 'actually', 'instead', 'should be', 'not that'\n2. PREFERENCE: User said 'prefer', 'like', 'want', 'please use', 'from now on', 'going forward', 'make sure', 'keep it'\n3. POSITIVE: User said 'perfect', 'exactly', 'great', 'love it', 'good call'\n\nIf matched, run: python3 $CLAUDE_PLUGIN_ROOT/scripts/cli.py signal correction --task <context> --context <project> --proposed <what_you_did> --corrected <what_user_wanted> --message '<exact_user_quote>'\n\nDo NOT rationalize the correction away. If the user redirected you, that IS a correction. Record it."
           }
         ]
       }
