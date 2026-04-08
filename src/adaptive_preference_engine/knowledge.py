@@ -30,6 +30,7 @@ class KnowledgeEntry:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_used: str = field(default_factory=lambda: datetime.now().isoformat())
     archived: bool = False
+    ref_path: Optional[str] = None
 
     def to_dict(self):
         return {
@@ -48,6 +49,7 @@ class KnowledgeEntry:
             "created_at": self.created_at,
             "last_used": self.last_used,
             "archived": self.archived,
+            "ref_path": self.ref_path,
         }
 
     @staticmethod

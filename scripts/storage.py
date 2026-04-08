@@ -117,7 +117,8 @@ CREATE TABLE IF NOT EXISTS knowledge (
     token_estimate  INTEGER DEFAULT 0,
     created_at      TEXT NOT NULL,
     last_used       TEXT NOT NULL,
-    archived        INTEGER DEFAULT 0
+    archived        INTEGER DEFAULT 0,
+    ref_path        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
 CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
@@ -555,11 +556,11 @@ class KnowledgeStorage(SQLiteDB):
                 INSERT INTO knowledge
                     (id, partition, category, title, tags, content, confidence,
                      source, machine_origin, decay_exempt, access_count,
-                     token_estimate, created_at, last_used, archived)
+                     token_estimate, created_at, last_used, archived, ref_path)
                 VALUES
                     (:id, :partition, :category, :title, :tags, :content, :confidence,
                      :source, :machine_origin, :decay_exempt, :access_count,
-                     :token_estimate, :created_at, :last_used, :archived)
+                     :token_estimate, :created_at, :last_used, :archived, :ref_path)
                 ON CONFLICT(id) DO UPDATE SET
                     partition       = excluded.partition,
                     category        = excluded.category,
@@ -573,7 +574,8 @@ class KnowledgeStorage(SQLiteDB):
                     access_count    = excluded.access_count,
                     token_estimate  = excluded.token_estimate,
                     last_used       = excluded.last_used,
-                    archived        = excluded.archived
+                    archived        = excluded.archived,
+                    ref_path        = excluded.ref_path
                 """,
                 {
                     **d,
@@ -672,7 +674,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    _CURRENT_VERSION = 4
+    _CURRENT_VERSION = 5
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
@@ -745,7 +747,8 @@ class PreferenceStorageManager:
                     token_estimate  INTEGER DEFAULT 0,
                     created_at      TEXT NOT NULL,
                     last_used       TEXT NOT NULL,
-                    archived        INTEGER DEFAULT 0
+                    archived        INTEGER DEFAULT 0,
+                    ref_path        TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
                 CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
@@ -782,6 +785,19 @@ class PreferenceStorageManager:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (4, datetime.now().isoformat()),
+                )
+
+        if current < 5:
+            # v5: ref_path column on knowledge (compaction system)
+            try:
+                self._conn.execute("ALTER TABLE knowledge ADD COLUMN ref_path TEXT")
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists (fresh DB)
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (5, datetime.now().isoformat()),
                 )
 
     def get_storage_info(self) -> Dict[str, Any]:
