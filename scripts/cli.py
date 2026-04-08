@@ -1181,6 +1181,17 @@ class AdaptivePreferenceCLI:
         self.storage.knowledge.save_entry(entry)
         print(f"Added: [{entry.partition}] {entry.title} ({entry.id})")
 
+        # Trigger compaction check
+        try:
+            from scripts.compaction import CompactionEngine
+            engine = CompactionEngine(self.storage)
+            compacted = engine.check_and_compact()
+            for p in compacted:
+                print(f"  Compacted: {p}")
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(f"Compaction check failed: {exc}")
+
     def cmd_knowledge_search(self, args):
         all_entries = self.storage.knowledge.get_all_entries()
         query = args.query.lower()

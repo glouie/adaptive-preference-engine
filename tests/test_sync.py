@@ -13,6 +13,7 @@ from scripts.config import AdaptiveConfig
 from scripts.storage import PreferenceStorageManager
 from scripts.sync import PreferenceSync, SyncRunner
 from scripts.models import generate_id, Association, ContextStack, Signal, Preference
+from adaptive_preference_engine.knowledge import KnowledgeEntry
 from datetime import datetime
 
 
@@ -31,6 +32,19 @@ def _make_signal(id=None):
         id=id or generate_id("s"),
         timestamp=datetime.now().isoformat(),
         type="correction",
+    )
+
+
+def _make_knowledge_entry(id=None, ref_path=None):
+    return KnowledgeEntry(
+        id=id or generate_id("k"),
+        partition="test/partition",
+        category="convention",
+        title="Test Knowledge Entry",
+        tags=["test"],
+        content="test content",
+        confidence=1.0,
+        ref_path=ref_path,
     )
 
 
@@ -91,6 +105,31 @@ class TestPreferenceSyncExportImport:
         PreferenceSync.export(src_mgr, export_dir)
         counts = PreferenceSync.import_from(dst_mgr, export_dir)
         assert counts == {"preferences": 1, "associations": 1, "contexts": 1, "signals": 1, "knowledge": 0}
+
+    def test_sync_preserves_ref_path(self, src_mgr, dst_mgr, tmp_path):
+        """Test that ref_path is exported and imported correctly"""
+        # Create knowledge entry with ref_path
+        entry = _make_knowledge_entry(id="k1", ref_path="partitions/test/consolidated.md")
+        src_mgr.knowledge.save_entry(entry)
+
+        # Export
+        export_dir = tmp_path / "export"
+        PreferenceSync.export(src_mgr, export_dir)
+
+        # Verify export contains ref_path
+        lines = (export_dir / "knowledge.jsonl").read_text().splitlines()
+        assert len(lines) == 1
+        exported = json.loads(lines[0])
+        assert exported["ref_path"] == "partitions/test/consolidated.md"
+
+        # Import into dst_mgr
+        counts = PreferenceSync.import_from(dst_mgr, export_dir)
+        assert counts["knowledge"] == 1
+
+        # Verify imported entry has ref_path
+        imported_entry = dst_mgr.knowledge.get_entry("k1")
+        assert imported_entry is not None
+        assert imported_entry.ref_path == "partitions/test/consolidated.md"
 
 
 class TestAdaptiveConfig:
