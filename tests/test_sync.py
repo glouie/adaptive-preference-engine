@@ -90,7 +90,7 @@ class TestPreferenceSyncExportImport:
         export_dir = tmp_path / "export"
         PreferenceSync.export(src_mgr, export_dir)
         counts = PreferenceSync.import_from(dst_mgr, export_dir)
-        assert counts == {"preferences": 1, "associations": 1, "contexts": 1, "signals": 1}
+        assert counts == {"preferences": 1, "associations": 1, "contexts": 1, "signals": 1, "knowledge": 0}
 
 
 class TestAdaptiveConfig:

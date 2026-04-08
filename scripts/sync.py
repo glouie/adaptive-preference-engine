@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
+from adaptive_preference_engine.knowledge import KnowledgeEntry
 from scripts.models import Association, ContextStack, Preference, Signal
 from scripts.storage import PreferenceStorageManager
 
@@ -58,6 +59,10 @@ class PreferenceSync:
         _write_jsonl(dest_dir / "signals.jsonl", [s.to_dict() for s in sigs])
         counts["signals"] = len(sigs)
 
+        knowledge = mgr.knowledge.get_all_entries(include_archived=True)
+        _write_jsonl(dest_dir / "knowledge.jsonl", [k.to_dict() for k in knowledge])
+        counts["knowledge"] = len(knowledge)
+
         return counts
 
     @staticmethod
@@ -69,7 +74,7 @@ class PreferenceSync:
         that are re-imported still increment the count).
         """
         src_dir = Path(src_dir)
-        counts: Dict[str, int] = {"preferences": 0, "associations": 0, "contexts": 0, "signals": 0}
+        counts: Dict[str, int] = {"preferences": 0, "associations": 0, "contexts": 0, "signals": 0, "knowledge": 0}
 
         for d in _read_jsonl(src_dir / "all_preferences.jsonl"):
             try:
@@ -115,6 +120,17 @@ class PreferenceSync:
                     f"Unexpected error importing signal {d.get('id')}: {e}"
                 ) from e
 
+        for d in _read_jsonl(src_dir / "knowledge.jsonl"):
+            try:
+                mgr.knowledge.save_entry(KnowledgeEntry.from_dict(d))
+                counts["knowledge"] += 1
+            except (ValueError, KeyError, TypeError) as e:
+                print(f"  WARNING: Skipping malformed knowledge {d.get('id')}: {e}")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Unexpected error importing knowledge {d.get('id')}: {e}"
+                ) from e
+
         return counts
 
 
@@ -157,7 +173,9 @@ class SyncRunner:
             return {"status": "up-to-date", "counts": counts}
 
         git_add = ["all_preferences.jsonl", "associations.jsonl",
-                   "contexts.jsonl", "signals.jsonl"]
+                   "contexts.jsonl", "signals.jsonl", "knowledge.jsonl"]
+        if (self.repo / "config.yaml").exists():
+            git_add.append("config.yaml")
         if (self.repo / "agents").exists():
             git_add.append("agents/")
         if (self.repo / "claude_scripts").exists():
@@ -270,6 +288,7 @@ class SyncRunner:
             "associations": info["associations_count"],
             "contexts":     info["contexts_count"],
             "signals":      info["signals_count"],
+            "knowledge":    info.get("knowledge_count", 0),
         }
 
         file_map = {
@@ -277,6 +296,7 @@ class SyncRunner:
             "associations": "associations.jsonl",
             "contexts":     "contexts.jsonl",
             "signals":      "signals.jsonl",
+            "knowledge":    "knowledge.jsonl",
         }
 
         pending: Dict[str, int] = {}
@@ -287,6 +307,34 @@ class SyncRunner:
             if diff != 0:
                 pending[table] = diff
         return pending
+
+    def diff(self) -> Dict:
+        """Compare local SQLite counts to repo JSONL counts."""
+        if not self.repo.exists():
+            return {"status": "no_repo", "diffs": {}}
+        local_info = self.mgr.get_storage_info()
+        local_counts = {
+            "preferences": local_info["preferences_count"],
+            "associations": local_info["associations_count"],
+            "contexts": local_info["contexts_count"],
+            "signals": local_info["signals_count"],
+            "knowledge": local_info.get("knowledge_count", 0),
+        }
+        file_map = {
+            "preferences": "all_preferences.jsonl",
+            "associations": "associations.jsonl",
+            "contexts": "contexts.jsonl",
+            "signals": "signals.jsonl",
+            "knowledge": "knowledge.jsonl",
+        }
+        diffs = {}
+        for table, filename in file_map.items():
+            path = self.repo / filename
+            remote_count = len(_read_jsonl(path))
+            diff_val = local_counts[table] - remote_count
+            if diff_val != 0:
+                diffs[table] = diff_val
+        return {"status": "ok", "diffs": diffs, "local": local_counts}
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
