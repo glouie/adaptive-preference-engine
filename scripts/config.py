@@ -68,6 +68,8 @@ _DEFAULTS = {
     "token_budgets": {
         "preferences": 500,
         "knowledge": 3000,
+        "partition": 1000,
+        "context_injection": 2000,
         "signals": 200,
         "total": 5000,
     },

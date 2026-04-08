@@ -39,3 +39,20 @@ class TestKnowledgeEntry:
         entry = KnowledgeEntry(id="x", partition="p", category="c", title="t",
                                tags=["a", "b"], content="c")
         assert isinstance(entry.to_dict()["tags"], list)
+
+    def test_ref_path_default_none(self):
+        entry = KnowledgeEntry(id="x", partition="p", category="c", title="t",
+                               tags=["a"], content="c")
+        assert entry.ref_path is None
+        d = entry.to_dict()
+        assert d["ref_path"] is None
+        restored = KnowledgeEntry.from_dict(d)
+        assert restored.ref_path is None
+
+    def test_ref_path_set(self):
+        entry = KnowledgeEntry(id="x", partition="p", category="c", title="t",
+                               tags=["a"], content="summary", ref_path="partitions/p/consolidated.md")
+        assert entry.ref_path == "partitions/p/consolidated.md"
+        d = entry.to_dict()
+        restored = KnowledgeEntry.from_dict(d)
+        assert restored.ref_path == "partitions/p/consolidated.md"

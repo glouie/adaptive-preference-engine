@@ -1181,6 +1181,17 @@ class AdaptivePreferenceCLI:
         self.storage.knowledge.save_entry(entry)
         print(f"Added: [{entry.partition}] {entry.title} ({entry.id})")
 
+        # Trigger compaction check
+        try:
+            from scripts.compaction import CompactionEngine
+            engine = CompactionEngine(self.storage)
+            compacted = engine.check_and_compact()
+            for p in compacted:
+                print(f"  Compacted: {p}")
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(f"Compaction check failed: {exc}")
+
     def cmd_knowledge_search(self, args):
         all_entries = self.storage.knowledge.get_all_entries()
         query = args.query.lower()
@@ -1227,9 +1238,30 @@ class AdaptivePreferenceCLI:
             print(f"  Machine:    {entry.machine_origin}")
         print(f"  Tokens:     {entry.token_estimate}")
         print(f"  Archived:   {entry.archived}")
-        print("-" * 60)
-        print()
-        print(entry.content)
+        if entry.ref_path:
+            print(f"  Ref Path:   {entry.ref_path}")
+            try:
+                from scripts.compaction import CompactionEngine
+                engine = CompactionEngine(self.storage)
+                full = engine.read_ref_content(entry)
+                if full:
+                    print("-" * 60)
+                    print(f"\n  --- Full content (loaded from {entry.ref_path}) ---\n")
+                    print(full)
+                else:
+                    print("-" * 60)
+                    print()
+                    print(f"  WARNING: Ref file not found at {entry.ref_path}")
+                    print(f"\n  --- Fallback to inline content ---\n")
+                    print(entry.content)
+            except Exception:
+                print("-" * 60)
+                print()
+                print(entry.content)
+        else:
+            print("-" * 60)
+            print()
+            print(entry.content)
 
     def cmd_knowledge_list(self, args):
         include_archived = getattr(args, "include_archived", False)
@@ -1253,7 +1285,8 @@ class AdaptivePreferenceCLI:
             print(f"  {partition}/  ({len(items)} entries, {ptokens} tokens)")
             for e in items:
                 flag = " [archived]" if e.archived else ""
-                print(f"    - {e.title} ({e.token_estimate}t, {e.category}){flag}")
+                ref_flag = " [ref]" if e.ref_path else ""
+                print(f"    - {e.title} ({e.token_estimate}t, {e.category}){flag}{ref_flag}")
 
     def cmd_knowledge_archive(self, args):
         entry = self.storage.knowledge.get_entry(args.identifier)

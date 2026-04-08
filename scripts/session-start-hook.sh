@@ -40,9 +40,10 @@ fi
 
 # Load preferences for this context
 prefs=$(python3 "$CLI" agent-context --context $context_tags 2>/dev/null || echo "")
-stat_line=$(python3 "$CLI" stats 2>/dev/null | head -3 || echo "")
+stat_line=$(python3 "$CLI" stats --oneline 2>/dev/null || echo "")
 
-pref_count=$(echo "$stat_line" | grep -o '[0-9]* preferences' | head -1 || echo "0 preferences")
-signal_count=$(echo "$stat_line" | grep -o '[0-9]* signals' | head -1 || echo "0 signals")
-
-echo "Adaptive preferences: ${pref_count}, ${signal_count} | context=${context_tags}"
+if [ -n "$stat_line" ]; then
+    echo "Adaptive preferences: ${stat_line} | context=${context_tags}"
+else
+    echo "Adaptive preferences: 0 preferences, 0 signals | context=${context_tags}"
+fi

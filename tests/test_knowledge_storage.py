@@ -22,6 +22,7 @@ def make_entry(**kwargs) -> KnowledgeEntry:
         content="Some test content here.",
         confidence=1.0,
         token_estimate=25,
+        ref_path=None,
     )
     defaults.update(kwargs)
     return KnowledgeEntry(**defaults)
@@ -98,6 +99,18 @@ class TestKnowledgeStorage:
         mgr.knowledge.record_access("know_1")
         result = mgr.knowledge.get_entry("know_1")
         assert result.access_count == 2
+
+    def test_save_and_retrieve_with_ref_path(self, mgr):
+        entry = make_entry(id="know_ref", ref_path="partitions/test/consolidated.md")
+        mgr.knowledge.save_entry(entry)
+        result = mgr.knowledge.get_entry("know_ref")
+        assert result.ref_path == "partitions/test/consolidated.md"
+
+    def test_ref_path_default_none(self, mgr):
+        entry = make_entry(id="know_no_ref")
+        mgr.knowledge.save_entry(entry)
+        result = mgr.knowledge.get_entry("know_no_ref")
+        assert result.ref_path is None
 
     def test_delete_entry(self, mgr):
         mgr.knowledge.save_entry(make_entry(id="know_1"))
