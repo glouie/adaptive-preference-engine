@@ -199,7 +199,67 @@ class PreferenceLoader:
                 selector_fallback = pref.id
 
         return substring_match or selector_fallback
-    
+
+    def load_knowledge_for_context(
+        self,
+        context_tags: List[str],
+        sync_repo_path: Optional[str] = None,
+        max_tokens: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        """Load knowledge entries matching context tags, reading ref files for compacted entries."""
+        all_entries = self.storage.knowledge.get_all_entries()
+        tags_lower = {t.lower() for t in context_tags}
+
+        scored = []
+        for entry in all_entries:
+            partition_parts = set(entry.partition.lower().replace("/", " ").split())
+            entry_tags = {t.lower() for t in entry.tags}
+            partition_match = bool(partition_parts & tags_lower)
+            tag_match = bool(entry_tags & tags_lower)
+
+            if not (partition_match or tag_match):
+                continue
+
+            score = (
+                (2 if partition_match else 0)
+                + (1 if tag_match else 0)
+                + entry.confidence * 0.5
+                + min(entry.access_count, 10) * 0.05
+            )
+            scored.append((score, entry))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        results = []
+        used_tokens = 0
+        for score, entry in scored:
+            if entry.ref_path and sync_repo_path:
+                ref_file = Path(sync_repo_path) / entry.ref_path
+                if ref_file.exists():
+                    content = ref_file.read_text(encoding="utf-8")
+                    source = "ref_file"
+                else:
+                    content = entry.content
+                    source = "summary_only"
+            else:
+                content = entry.content
+                source = "inline"
+
+            est_tokens = len(content) // 4
+            if used_tokens + est_tokens > max_tokens:
+                break
+
+            results.append({
+                "title": entry.title,
+                "partition": entry.partition,
+                "content": content,
+                "source": source,
+            })
+            used_tokens += est_tokens
+            self.storage.knowledge.record_access(entry.id)
+
+        return results
+
     def _load_preference_tree(self, pref_id: str) -> Dict[str, Any]:
         """
         Load the full preference tree starting from a preference.
@@ -250,7 +310,23 @@ class PreferenceLoader:
             "note": "Use primary first, fall back to associated based on confidence",
             "compact": compact,
         }
-        
+
+        # Load matching knowledge
+        try:
+            from scripts.config import AdaptiveConfig, APEConfig
+            adaptive_cfg = AdaptiveConfig(str(self.storage.base_dir))
+            sync_repo = adaptive_cfg.sync_repo_path
+            ape_cfg = APEConfig.load(str(self.storage.base_dir))
+            injection_budget = ape_cfg.get("token_budgets.context_injection", 2000)
+            knowledge = self.load_knowledge_for_context(
+                context_tags=context_tags,
+                sync_repo_path=sync_repo,
+                max_tokens=injection_budget,
+            )
+            agent_context["knowledge"] = knowledge
+        except Exception:
+            agent_context["knowledge"] = []
+
         return json.dumps(agent_context, indent=2)
 
 
