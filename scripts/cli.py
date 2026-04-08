@@ -399,7 +399,7 @@ class AdaptivePreferenceCLI:
             warnings.append(f"total ({total_tokens}/{budget_total} tokens)")
 
         if getattr(args, 'oneline', False):
-            parts = f"{info['preferences_count']}p {info['associations_count']}a {info['signals_count']}s {info.get('knowledge_count', 0)}k"
+            parts = f"{info['preferences_count']}p {info['associations_count']}a {info.get('behaviors_count', 0)}b {info['signals_count']}s {info.get('knowledge_count', 0)}k"
             if warnings:
                 parts += " [prune]"
             print(parts)
