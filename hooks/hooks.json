@@ -28,15 +28,6 @@
             "command": "python3 $CLAUDE_PLUGIN_ROOT/scripts/posttool-signal-detector.py"
           }
         ]
-      },
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "The APE signal detector command hook already ran on this edit. If it detected a user correction or preference, it recorded it automatically. Do NOT pause, check, or output anything — continue your current task without interruption."
-          }
-        ]
       }
     ]
   }
