@@ -377,17 +377,53 @@ class AdaptivePreferenceCLI:
     def cmd_show_stats(self, args):
         """Show storage statistics"""
         info = self.storage.get_storage_info()
+        from scripts.config import APEConfig
+        cfg = APEConfig.load(str(self.storage.base_dir))
 
-        print(f"\n📊 Storage Statistics")
-        print(f"   DB Path: {info['db_path']}")
-        print(f"   Preferences: {info['preferences_count']}")
+        knowledge_entries = self.storage.knowledge.get_all_entries()
+        knowledge_tokens = sum(e.token_estimate for e in knowledge_entries)
+        pref_tokens = info["preferences_count"] * 20
+        signal_tokens = info["signals_count"] * 10
+
+        budget_prefs = cfg.get("token_budgets.preferences", 500)
+        budget_knowledge = cfg.get("token_budgets.knowledge", 3000)
+        budget_total = cfg.get("token_budgets.total", 5000)
+
+        warnings = []
+        if pref_tokens > budget_prefs:
+            warnings.append(f"preferences ({pref_tokens}/{budget_prefs} tokens)")
+        if knowledge_tokens > budget_knowledge:
+            warnings.append(f"knowledge ({knowledge_tokens}/{budget_knowledge} tokens)")
+        total_tokens = pref_tokens + knowledge_tokens + signal_tokens
+        if total_tokens > budget_total:
+            warnings.append(f"total ({total_tokens}/{budget_total} tokens)")
+
+        if getattr(args, 'oneline', False):
+            parts = f"{info['preferences_count']}p {info['associations_count']}a {info['signals_count']}s {info.get('knowledge_count', 0)}k"
+            if warnings:
+                parts += " [prune]"
+            print(parts)
+            return
+
+        print(f"\nStorage Statistics")
+        print(f"   DB Path:      {info['db_path']}")
+        print(f"   Preferences:  {info['preferences_count']} (~{pref_tokens} tokens)")
         print(f"   Associations: {info['associations_count']}")
-        print(f"   Contexts: {info['contexts_count']}")
-        print(f"   Signals: {info['signals_count']}")
-        # Hint sync if not configured
-        cfg = AdaptiveConfig(str(self.storage.base_dir))
-        if not cfg.sync_repo_path:
-            print(f"\n💡 Tip: sync preferences across machines with 'adaptive-cli sync configure --repo-path <path>'")
+        print(f"   Contexts:     {info['contexts_count']}")
+        print(f"   Signals:      {info['signals_count']}")
+        print(f"   Knowledge:    {info.get('knowledge_count', 0)} ({knowledge_tokens} tokens)")
+        print(f"   Behaviors:    {info.get('behaviors_count', 0)}")
+
+        if warnings:
+            print()
+            print("Budget Warnings:")
+            for w in warnings:
+                print(f"  [!] Over budget: {w}")
+            print("  Run `adaptive-cli prune` to review stale entries.")
+        else:
+            old_cfg = AdaptiveConfig(str(self.storage.base_dir))
+            if not old_cfg.sync_repo_path:
+                print(f"\n   Tip: sync preferences across machines with 'adaptive-cli sync configure --repo-path <path>'")
     
     def cmd_reset(self, args):
         """Reset all preferences"""
@@ -1124,6 +1160,149 @@ class AdaptivePreferenceCLI:
         elif not cfg.buddy_enabled:
             print("  Run: adaptive-cli buddy enable")
 
+    # ---- Knowledge Management ----
+
+    def cmd_knowledge_add(self, args):
+        import socket
+        from adaptive_preference_engine.knowledge import KnowledgeEntry
+        entry = KnowledgeEntry(
+            id=generate_id("know"),
+            partition=args.partition,
+            category=args.category,
+            title=args.title,
+            tags=args.tags,
+            content=args.content,
+            confidence=args.confidence,
+            source="explicit",
+            machine_origin=socket.gethostname(),
+            decay_exempt=args.decay_exempt,
+            token_estimate=len(args.content) // 4,
+        )
+        self.storage.knowledge.save_entry(entry)
+        print(f"Added: [{entry.partition}] {entry.title} ({entry.id})")
+
+    def cmd_knowledge_search(self, args):
+        all_entries = self.storage.knowledge.get_all_entries()
+        query = args.query.lower()
+        results = [e for e in all_entries
+                   if query in e.title.lower()
+                   or query in e.content.lower()
+                   or any(query in t.lower() for t in e.tags)]
+        if args.partition:
+            results = [r for r in results if r.partition == args.partition]
+        if args.category:
+            results = [r for r in results if r.category == args.category]
+        if not results:
+            print(f"No results for '{args.query}'")
+            return
+        print(f"Search: \"{args.query}\" ({len(results)} results)")
+        print("-" * 60)
+        for i, r in enumerate(results, 1):
+            tags_str = ", ".join(r.tags) if r.tags else ""
+            print(f"  {i}. [{r.partition}] {r.title}")
+            print(f"     Tags: {tags_str} | {r.token_estimate} tokens | Confidence: {r.confidence}")
+
+    def cmd_knowledge_show(self, args):
+        entry = self.storage.knowledge.get_entry(args.identifier)
+        if not entry:
+            all_entries = self.storage.knowledge.get_all_entries(include_archived=True)
+            matches = [e for e in all_entries if args.identifier.lower() in e.title.lower()]
+            entry = matches[0] if matches else None
+        if not entry:
+            print(f"Not found: {args.identifier}")
+            return
+        self.storage.knowledge.record_access(entry.id)
+        entry = self.storage.knowledge.get_entry(entry.id)
+        tags_str = ", ".join(entry.tags)
+        print(f"-- {entry.title} " + "-" * max(0, 50 - len(entry.title)))
+        print(f"  ID:         {entry.id}")
+        print(f"  Partition:  {entry.partition}")
+        print(f"  Category:   {entry.category}")
+        print(f"  Confidence: {entry.confidence}")
+        print(f"  Source:     {entry.source}")
+        print(f"  Created:    {entry.created_at[:10]}")
+        print(f"  Last used:  {entry.last_used[:10]} (accessed {entry.access_count} times)")
+        print(f"  Tags:       {tags_str}")
+        if entry.machine_origin:
+            print(f"  Machine:    {entry.machine_origin}")
+        print(f"  Tokens:     {entry.token_estimate}")
+        print(f"  Archived:   {entry.archived}")
+        print("-" * 60)
+        print()
+        print(entry.content)
+
+    def cmd_knowledge_list(self, args):
+        include_archived = getattr(args, "include_archived", False)
+        entries = self.storage.knowledge.get_all_entries(include_archived=include_archived)
+        if args.partition:
+            entries = [e for e in entries if e.partition == args.partition]
+        if args.category:
+            entries = [e for e in entries if e.category == args.category]
+        if not entries:
+            print("No knowledge entries found.")
+            return
+        by_partition = {}
+        for e in entries:
+            by_partition.setdefault(e.partition, []).append(e)
+        total_tokens = sum(e.token_estimate for e in entries)
+        print(f"Knowledge Store: {len(entries)} entries ({total_tokens} tokens)")
+        print("-" * 60)
+        for partition in sorted(by_partition.keys()):
+            items = by_partition[partition]
+            ptokens = sum(e.token_estimate for e in items)
+            print(f"  {partition}/  ({len(items)} entries, {ptokens} tokens)")
+            for e in items:
+                flag = " [archived]" if e.archived else ""
+                print(f"    - {e.title} ({e.token_estimate}t, {e.category}){flag}")
+
+    def cmd_knowledge_archive(self, args):
+        entry = self.storage.knowledge.get_entry(args.identifier)
+        if not entry:
+            all_entries = self.storage.knowledge.get_all_entries()
+            matches = [e for e in all_entries if args.identifier.lower() in e.title.lower()]
+            entry = matches[0] if matches else None
+        if not entry:
+            print(f"Not found: {args.identifier}")
+            return
+        self.storage.knowledge.archive_entry(entry.id)
+        print(f"Archived: [{entry.partition}] {entry.title}")
+
+    def cmd_knowledge_restore(self, args):
+        self.storage.knowledge.unarchive_entry(args.entry_id)
+        print(f"Restored: {args.entry_id}")
+
+    def cmd_knowledge_prune(self, args):
+        from scripts.config import APEConfig
+        cfg = APEConfig.load(str(self.storage.base_dir))
+        entries = self.storage.knowledge.get_all_entries()
+        now = datetime.now()
+        candidates = []
+        for e in entries:
+            if e.decay_exempt:
+                continue
+            threshold_days = cfg.get(f"pruning.{e.category}", 180)
+            try:
+                last = datetime.fromisoformat(e.last_used)
+                age_days = (now - last).days
+            except (ValueError, TypeError):
+                age_days = 0
+            if age_days > threshold_days:
+                candidates.append((e, age_days, threshold_days))
+        if not candidates:
+            print("No stale entries found.")
+            return
+        total_tokens = sum(e.token_estimate for e, _, _ in candidates)
+        print(f"Prune Candidates ({len(candidates)} entries, {total_tokens} tokens):")
+        print("-" * 60)
+        for i, (e, age, thresh) in enumerate(candidates, 1):
+            print(f"  {i}. [{e.partition}] {e.title} (unused {age}d, threshold {int(thresh)}d)")
+        if args.dry_run:
+            print("\n(dry run - no changes made)")
+            return
+        for e, _, _ in candidates:
+            self.storage.knowledge.archive_entry(e.id)
+        print(f"Archived {len(candidates)} entries.")
+
     def cmd_behavior_setup(self, args):
         """Run setup_script for each behavior (or the named one)."""
         import subprocess
@@ -1291,7 +1470,8 @@ Examples:
     
     # Maintenance commands
     stats_parser = subparsers.add_parser("stats", help="Show statistics")
-    
+    stats_parser.add_argument("--oneline", action="store_true", help="Compact single-line output for statusline")
+
     recalc_parser = subparsers.add_parser("recalculate", help="Recalculate strengths")
     recalc_parser.add_argument("--details", action="store_true")
     
@@ -1540,6 +1720,43 @@ Examples:
     )
     beh_setup.add_argument("--name", default=None, help="Set up only this behavior")
 
+    # Knowledge commands
+    knowledge_parser = subparsers.add_parser("knowledge", help="Manage knowledge entries")
+    knowledge_sub = knowledge_parser.add_subparsers(dest="knowledge_subcommand")
+
+    know_add = knowledge_sub.add_parser("add", help="Add a knowledge entry")
+    know_add.add_argument("--title", required=True, help="Entry title")
+    know_add.add_argument("--partition", required=True, help="Partition path (e.g. projects/monitor-cinc)")
+    know_add.add_argument("--category", required=True,
+                          choices=["preference", "pattern", "decision", "convention", "context"])
+    know_add.add_argument("--content", required=True, help="Markdown content")
+    know_add.add_argument("--tags", nargs="+", default=[], help="Tags for discovery")
+    know_add.add_argument("--confidence", type=float, default=1.0)
+    know_add.add_argument("--decay-exempt", action="store_true", dest="decay_exempt")
+
+    know_search = knowledge_sub.add_parser("search", help="Search knowledge entries")
+    know_search.add_argument("query", help="Search query (matches title, content, tags)")
+    know_search.add_argument("--partition", default=None, help="Filter by partition")
+    know_search.add_argument("--category", default=None, help="Filter by category")
+
+    know_show = knowledge_sub.add_parser("show", help="Show a knowledge entry")
+    know_show.add_argument("identifier", help="Entry ID or title substring")
+
+    know_list = knowledge_sub.add_parser("list", help="List knowledge entries")
+    know_list.add_argument("--partition", default=None, help="Filter by partition")
+    know_list.add_argument("--category", default=None, help="Filter by category")
+    know_list.add_argument("--include-archived", action="store_true", dest="include_archived")
+
+    know_archive = knowledge_sub.add_parser("archive", help="Archive a knowledge entry")
+    know_archive.add_argument("identifier", help="Entry ID or title substring")
+
+    know_restore = knowledge_sub.add_parser("restore", help="Restore an archived entry")
+    know_restore.add_argument("entry_id", help="Entry ID")
+
+    # Top-level prune
+    prune_parser = subparsers.add_parser("prune", help="Find and archive stale knowledge entries")
+    prune_parser.add_argument("--dry-run", action="store_true", dest="dry_run")
+
     # buddy
     buddy_parser = subparsers.add_parser(
         "buddy",
@@ -1686,9 +1903,28 @@ Examples:
             else:
                 behavior_parser.print_help()
 
+        elif args.command == "knowledge":
+            if args.knowledge_subcommand == "add":
+                cli.cmd_knowledge_add(args)
+            elif args.knowledge_subcommand == "search":
+                cli.cmd_knowledge_search(args)
+            elif args.knowledge_subcommand == "show":
+                cli.cmd_knowledge_show(args)
+            elif args.knowledge_subcommand == "list":
+                cli.cmd_knowledge_list(args)
+            elif args.knowledge_subcommand == "archive":
+                cli.cmd_knowledge_archive(args)
+            elif args.knowledge_subcommand == "restore":
+                cli.cmd_knowledge_restore(args)
+            else:
+                knowledge_parser.print_help()
+
+        elif args.command == "prune":
+            cli.cmd_knowledge_prune(args)
+
         else:
             parser.print_help()
-    
+
     except Exception as e:
         print(f"❌ Error: {e}")
         sys.exit(1)
