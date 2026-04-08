@@ -285,6 +285,9 @@ class SignalProcessor:
 
             emotional_indicators = self._extract_emotional_indicators(user_response)
 
+            # Resolve generic placeholders to actual preference IDs
+            resolved_prefs = self._resolve_preferences_used(preferences_used, context_tags)
+
             signal = Signal(
                 id=generate_id("sig"),
                 timestamp=datetime.now().isoformat(),
@@ -294,11 +297,11 @@ class SignalProcessor:
                 user_response=user_response,
                 emotional_tone=emotional_tone,
                 emotional_indicators=emotional_indicators,
-                preferences_used=preferences_used
+                preferences_used=resolved_prefs
             )
 
             # STEP 1: Boost confidence in used preferences based on satisfaction
-            for pref_id in preferences_used:
+            for pref_id in resolved_prefs:
                 adjustment = (satisfaction_level - 0.5) * 0.1  # -0.05 to +0.05
                 self._update_preference_for_feedback(pref_id, adjustment)
 
@@ -350,7 +353,43 @@ class SignalProcessor:
             self._record_attempt_metrics(metrics, "feedback", success, start_time)
     
     # ---- Helper Methods ----
-    
+
+    def _resolve_preferences_used(
+        self,
+        preferences_used: List[str],
+        context_tags: List[str],
+    ) -> List[str]:
+        """Resolve generic placeholders to actual preference IDs.
+
+        When the caller passes ['general'] or other non-ID values, look up
+        preferences that match the context tags.  If real pref IDs are passed,
+        return them unchanged.
+        """
+        # Check if any entry is a real preference ID
+        real_ids = [
+            pid for pid in preferences_used
+            if self.storage.preferences.get_preference(pid) is not None
+        ]
+        if real_ids:
+            return real_ids
+
+        # Fallback: find preferences whose path overlaps with context tags
+        all_prefs = self.storage.preferences.get_all_preferences()
+        if not all_prefs:
+            return preferences_used  # nothing to resolve to
+
+        matched = []
+        for pref in all_prefs:
+            path_parts = set(pref.path.split("."))
+            if path_parts & set(context_tags):
+                matched.append(pref.id)
+
+        # If no tag match, boost all preferences (broad positive signal)
+        if not matched:
+            matched = [p.id for p in all_prefs]
+
+        return matched
+
     def _detect_emotional_tone(self, text: str) -> str:
         """Detect emotional tone from user text"""
         if not text:

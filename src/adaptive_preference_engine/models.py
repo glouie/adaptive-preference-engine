@@ -96,10 +96,17 @@ class AssociationLearning:
 
 @dataclass
 class Association:
-    """Bidirectional association between two preferences"""
+    """Association between preferences, behaviors, or rules.
+
+    Types:
+      correlation — preferences that tend to co-occur
+      rule        — trigger -> action (when X happens, do Y)
+      directive   — always apply action in given context
+    """
     id: str
-    from_id: str              # e.g., "communication.output_format.table"
-    to_id: str                # e.g., "coding.data_structure_clarity"
+    from_id: str              # trigger, context, or preference ID
+    to_id: str                # action, preference, or behavior ID
+    association_type: Literal["correlation", "rule", "directive"] = "correlation"
     bidirectional: bool = True
     
     strength_forward: float = 0.5   # A → B strength
@@ -120,6 +127,7 @@ class Association:
             "id": self.id,
             "from_id": self.from_id,
             "to_id": self.to_id,
+            "association_type": self.association_type,
             "bidirectional": self.bidirectional,
             "strength_forward": self.strength_forward,
             "strength_backward": self.strength_backward,

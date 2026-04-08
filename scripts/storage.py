@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS associations (
     id                  TEXT PRIMARY KEY,
     from_id             TEXT NOT NULL,
     to_id               TEXT NOT NULL,
+    association_type    TEXT    DEFAULT 'correlation',
     bidirectional       INTEGER DEFAULT 1,
     strength_forward    REAL    DEFAULT 0.5,
     strength_backward   REAL    DEFAULT 0.5,
@@ -320,18 +321,19 @@ class AssociationStorage(SQLiteDB):
             self._conn.execute(
                 """
                 INSERT INTO associations
-                    (id, from_id, to_id, bidirectional, strength_forward,
-                     strength_backward, learning_forward, learning_backward,
-                     description, context_tags, created, time_decay_factor,
-                     last_decay_applied)
+                    (id, from_id, to_id, association_type, bidirectional,
+                     strength_forward, strength_backward, learning_forward,
+                     learning_backward, description, context_tags, created,
+                     time_decay_factor, last_decay_applied)
                 VALUES
-                    (:id, :from_id, :to_id, :bidirectional, :strength_forward,
-                     :strength_backward, :learning_forward, :learning_backward,
-                     :description, :context_tags, :created, :time_decay_factor,
-                     :last_decay_applied)
+                    (:id, :from_id, :to_id, :association_type, :bidirectional,
+                     :strength_forward, :strength_backward, :learning_forward,
+                     :learning_backward, :description, :context_tags, :created,
+                     :time_decay_factor, :last_decay_applied)
                 ON CONFLICT(id) DO UPDATE SET
                     from_id            = excluded.from_id,
                     to_id              = excluded.to_id,
+                    association_type   = excluded.association_type,
                     bidirectional      = excluded.bidirectional,
                     strength_forward   = excluded.strength_forward,
                     strength_backward  = excluded.strength_backward,
@@ -670,7 +672,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    _CURRENT_VERSION = 3
+    _CURRENT_VERSION = 4
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
@@ -765,6 +767,21 @@ class PreferenceStorageManager:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (3, datetime.now().isoformat()),
+                )
+
+        if current < 4:
+            # v4: association_type column on associations (correlation/rule/directive)
+            try:
+                self._conn.execute(
+                    "ALTER TABLE associations ADD COLUMN association_type TEXT DEFAULT 'correlation'"
+                )
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists (fresh DB)
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (4, datetime.now().isoformat()),
                 )
 
     def get_storage_info(self) -> Dict[str, Any]:
