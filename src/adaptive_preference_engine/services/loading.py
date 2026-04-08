@@ -5,6 +5,7 @@ preference_loader.py - Load preferences with associations using Option C strateg
 
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+from pathlib import Path
 from adaptive_preference_engine.models import Association, ContextStack
 from adaptive_preference_engine.storage import PreferenceStorageManager
 import json
