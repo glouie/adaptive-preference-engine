@@ -41,3 +41,11 @@ class TestAPEConfig:
         (cfg_dir / "config.json").write_text(json.dumps({"custom": True}))
         APEConfig.save_defaults(str(cfg_dir))
         assert json.loads((cfg_dir / "config.json").read_text()) == {"custom": True}
+
+    def test_partition_budget_default(self, cfg_dir):
+        cfg = APEConfig.load(str(cfg_dir))
+        assert cfg.get("token_budgets.partition") == 1000
+
+    def test_context_injection_budget_default(self, cfg_dir):
+        cfg = APEConfig.load(str(cfg_dir))
+        assert cfg.get("token_budgets.context_injection") == 2000
