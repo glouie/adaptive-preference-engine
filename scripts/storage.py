@@ -32,6 +32,7 @@ from scripts.models import (
     Preference, Signal,
 )
 from scripts.behaviors import BehaviorStorage, BEHAVIOR_SCHEMA
+from adaptive_preference_engine.knowledge import KnowledgeEntry
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS preferences (
@@ -99,6 +100,27 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS idx_sig_timestamp ON signals(timestamp);
 CREATE INDEX IF NOT EXISTS idx_sig_type      ON signals(type);
+
+CREATE TABLE IF NOT EXISTS knowledge (
+    id              TEXT PRIMARY KEY,
+    partition       TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    tags            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    confidence      REAL DEFAULT 1.0,
+    source          TEXT DEFAULT 'explicit',
+    machine_origin  TEXT,
+    decay_exempt    INTEGER DEFAULT 0,
+    access_count    INTEGER DEFAULT 0,
+    token_estimate  INTEGER DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    last_used       TEXT NOT NULL,
+    archived        INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
+CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
+CREATE INDEX IF NOT EXISTS idx_know_archived  ON knowledge(archived);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     version     INTEGER NOT NULL,
@@ -520,6 +542,127 @@ class SignalStorage(SQLiteDB):
         return Signal.from_dict(d)
 
 
+class KnowledgeStorage(SQLiteDB):
+    """CRUD for the `knowledge` table."""
+
+    def save_entry(self, entry: KnowledgeEntry) -> None:
+        d = entry.to_dict()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO knowledge
+                    (id, partition, category, title, tags, content, confidence,
+                     source, machine_origin, decay_exempt, access_count,
+                     token_estimate, created_at, last_used, archived)
+                VALUES
+                    (:id, :partition, :category, :title, :tags, :content, :confidence,
+                     :source, :machine_origin, :decay_exempt, :access_count,
+                     :token_estimate, :created_at, :last_used, :archived)
+                ON CONFLICT(id) DO UPDATE SET
+                    partition       = excluded.partition,
+                    category        = excluded.category,
+                    title           = excluded.title,
+                    tags            = excluded.tags,
+                    content         = excluded.content,
+                    confidence      = excluded.confidence,
+                    source          = excluded.source,
+                    machine_origin  = excluded.machine_origin,
+                    decay_exempt    = excluded.decay_exempt,
+                    access_count    = excluded.access_count,
+                    token_estimate  = excluded.token_estimate,
+                    last_used       = excluded.last_used,
+                    archived        = excluded.archived
+                """,
+                {
+                    **d,
+                    "tags": json.dumps(d["tags"]),
+                    "decay_exempt": int(d["decay_exempt"]),
+                    "archived": int(d["archived"]),
+                },
+            )
+
+    def get_entry(self, entry_id: str) -> Optional[KnowledgeEntry]:
+        row = self._conn.execute(
+            "SELECT * FROM knowledge WHERE id = ?", (entry_id,)
+        ).fetchone()
+        return self._row_to_entry(row) if row else None
+
+    def get_entries_by_partition(self, partition: str, include_archived: bool = False) -> List[KnowledgeEntry]:
+        if include_archived:
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge WHERE partition = ?", (partition,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge WHERE partition = ? AND archived = 0", (partition,)
+            ).fetchall()
+        return [self._row_to_entry(r) for r in rows]
+
+    def get_entries_by_category(self, category: str, include_archived: bool = False) -> List[KnowledgeEntry]:
+        if include_archived:
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge WHERE category = ?", (category,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge WHERE category = ? AND archived = 0", (category,)
+            ).fetchall()
+        return [self._row_to_entry(r) for r in rows]
+
+    def search_by_tags(self, tags: List[str], include_archived: bool = False) -> List[KnowledgeEntry]:
+        """Return entries that have ANY of the provided tags (OR logic)."""
+        all_entries = self.get_all_entries(include_archived=include_archived)
+        matches = []
+        for entry in all_entries:
+            if any(tag in entry.tags for tag in tags):
+                matches.append(entry)
+        return matches
+
+    def get_all_entries(self, include_archived: bool = False) -> List[KnowledgeEntry]:
+        if include_archived:
+            rows = self._conn.execute("SELECT * FROM knowledge").fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM knowledge WHERE archived = 0").fetchall()
+        return [self._row_to_entry(r) for r in rows]
+
+    def record_access(self, entry_id: str) -> None:
+        """Increment access_count and update last_used timestamp."""
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE knowledge
+                SET access_count = access_count + 1,
+                    last_used = ?
+                WHERE id = ?
+                """,
+                (datetime.now().isoformat(), entry_id),
+            )
+
+    def archive_entry(self, entry_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE knowledge SET archived = 1 WHERE id = ?", (entry_id,)
+            )
+
+    def unarchive_entry(self, entry_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE knowledge SET archived = 0 WHERE id = ?", (entry_id,)
+            )
+
+    def delete_entry(self, entry_id: str) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))
+
+    @staticmethod
+    def _row_to_entry(row: sqlite3.Row) -> KnowledgeEntry:
+        d = dict(row)
+        d["tags"] = json.loads(d["tags"])
+        d["decay_exempt"] = bool(d["decay_exempt"])
+        d["archived"] = bool(d["archived"])
+        return KnowledgeEntry.from_dict(d)
+
+
 class PreferenceStorageManager:
     """
     Facade that owns the single SQLite connection and exposes typed
@@ -527,7 +670,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    _CURRENT_VERSION = 2
+    _CURRENT_VERSION = 3
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
@@ -554,6 +697,7 @@ class PreferenceStorageManager:
         self.contexts     = ContextStorage(self._conn)
         self.signals      = SignalStorage(self._conn)
         self.behaviors    = BehaviorStorage(self._conn)
+        self.knowledge    = KnowledgeStorage(self._conn)
 
     def _apply_migrations(self) -> None:
         """Ensure schema_version reflects the current version. Runs pending migrations."""
@@ -579,6 +723,50 @@ class PreferenceStorageManager:
                     (2, datetime.now().isoformat()),
                 )
 
+        if current < 3:
+            # v3: knowledge table + decay_exempt on preferences + machine_origin on signals
+            # Knowledge table DDL is already in _SCHEMA (runs on fresh DBs).
+            # For existing DBs, create the table if it doesn't exist.
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS knowledge (
+                    id              TEXT PRIMARY KEY,
+                    partition       TEXT NOT NULL,
+                    category        TEXT NOT NULL,
+                    title           TEXT NOT NULL,
+                    tags            TEXT NOT NULL,
+                    content         TEXT NOT NULL,
+                    confidence      REAL DEFAULT 1.0,
+                    source          TEXT DEFAULT 'explicit',
+                    machine_origin  TEXT,
+                    decay_exempt    INTEGER DEFAULT 0,
+                    access_count    INTEGER DEFAULT 0,
+                    token_estimate  INTEGER DEFAULT 0,
+                    created_at      TEXT NOT NULL,
+                    last_used       TEXT NOT NULL,
+                    archived        INTEGER DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
+                CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
+                CREATE INDEX IF NOT EXISTS idx_know_archived  ON knowledge(archived);
+            """)
+            # Add decay_exempt column to preferences (for pruning support)
+            try:
+                self._conn.execute("ALTER TABLE preferences ADD COLUMN decay_exempt INTEGER DEFAULT 0")
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists (fresh DB)
+            # Add machine_origin column to signals (for multi-machine tracking)
+            try:
+                self._conn.execute("ALTER TABLE signals ADD COLUMN machine_origin TEXT")
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists (fresh DB)
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (3, datetime.now().isoformat()),
+                )
+
     def get_storage_info(self) -> Dict[str, Any]:
         return {
             "base_dir": str(self.base_dir),
@@ -597,6 +785,9 @@ class PreferenceStorageManager:
             ).fetchone()[0],
             "behaviors_count": self._conn.execute(
                 "SELECT COUNT(*) FROM behaviors"
+            ).fetchone()[0],
+            "knowledge_count": self._conn.execute(
+                "SELECT COUNT(*) FROM knowledge"
             ).fetchone()[0],
         }
 
@@ -670,6 +861,7 @@ class PreferenceStorageManager:
         _RESET_TABLES = frozenset({
             "behavior_behavior_deps", "behavior_pref_deps", "behaviors",
             "preferences", "associations", "contexts", "signals",
+            "knowledge",
         })
         with self._conn:
             for table in _RESET_TABLES:

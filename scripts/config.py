@@ -60,3 +60,91 @@ class AdaptiveConfig:
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._data, indent=2))
         os.replace(tmp, self._path)
+
+
+# ── APE Layered Config ──────────────────────────────────────────────────────
+
+_DEFAULTS = {
+    "token_budgets": {
+        "preferences": 500,
+        "knowledge": 3000,
+        "signals": 200,
+        "total": 5000,
+    },
+    "pruning": {
+        "preference": 180,
+        "pattern": 90,
+        "decision": 60,
+        "convention": 120,
+        "context": 30,
+    },
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base. Override wins on conflicts."""
+    merged = dict(base)
+    for key, val in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
+            merged[key] = _deep_merge(merged[key], val)
+        else:
+            merged[key] = val
+    return merged
+
+
+class APEConfig:
+    """Layered configuration: defaults < config.json < sync repo config.yaml."""
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    @classmethod
+    def load(cls, base_dir: str, sync_repo_path: Optional[str] = None) -> "APEConfig":
+        import copy
+        data = copy.deepcopy(_DEFAULTS)
+
+        config_json = Path(base_dir) / "config.json"
+        if config_json.exists():
+            try:
+                with open(config_json) as f:
+                    local = json.load(f)
+                data = _deep_merge(data, local)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        if sync_repo_path:
+            config_yaml = Path(sync_repo_path) / "config.yaml"
+            if config_yaml.exists():
+                try:
+                    import yaml
+                    with open(config_yaml) as f:
+                        remote = yaml.safe_load(f) or {}
+                    data = _deep_merge(data, remote)
+                except ImportError:
+                    pass
+
+        return cls(data)
+
+    def get(self, dotpath: str, default=None):
+        """Dot-path access: config.get('token_budgets.knowledge', 3000)."""
+        keys = dotpath.split(".")
+        obj = self._data
+        for key in keys:
+            if isinstance(obj, dict) and key in obj:
+                obj = obj[key]
+            else:
+                return default
+        return obj
+
+    @property
+    def data(self) -> dict:
+        return self._data
+
+    @staticmethod
+    def save_defaults(base_dir: str) -> None:
+        """Write config.json with defaults if it doesn't exist."""
+        config_path = Path(base_dir) / "config.json"
+        if not config_path.exists():
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w") as f:
+                json.dump(_DEFAULTS, f, indent=2)
