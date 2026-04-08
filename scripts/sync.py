@@ -122,14 +122,31 @@ class PreferenceSync:
 
         for d in _read_jsonl(src_dir / "knowledge.jsonl"):
             try:
-                mgr.knowledge.save_entry(KnowledgeEntry.from_dict(d))
+                entry_obj = KnowledgeEntry.from_dict(d)
+                mgr.knowledge.save_entry(entry_obj)
                 counts["knowledge"] += 1
+                # Warn if ref_path exists but file not found
+                if hasattr(entry_obj, 'ref_path') and entry_obj.ref_path:
+                    ref_file = src_dir / entry_obj.ref_path
+                    if not ref_file.exists():
+                        print(f"  WARNING: Knowledge entry {entry_obj.id} references {entry_obj.ref_path} but file not found")
             except (ValueError, KeyError, TypeError) as e:
                 print(f"  WARNING: Skipping malformed knowledge {d.get('id')}: {e}")
             except Exception as e:
                 raise RuntimeError(
                     f"Unexpected error importing knowledge {d.get('id')}: {e}"
                 ) from e
+
+        # Trigger compaction after importing knowledge
+        if counts["knowledge"] > 0:
+            try:
+                from scripts.compaction import CompactionEngine
+                engine = CompactionEngine(mgr)
+                compacted = engine.check_and_compact()
+                if compacted:
+                    print(f"  Compacted {len(compacted)} partition(s) after import")
+            except Exception as exc:
+                print(f"  WARNING: Post-import compaction failed: {exc}")
 
         return counts
 
