@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Adaptive Preference Engine — SessionStart Hook
-# Loads learned preferences based on the current project context.
-# Outputs a summary for Claude's system context.
+# Loads hot-tier preferences matching the current project context.
+# Uses --auto-detect for context detection and tier-filtered loading.
 
 set -euo pipefail
 
@@ -9,26 +9,8 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ADAPTIVE_DIR="$HOME/.adaptive-cli"
 CLI="$PLUGIN_ROOT/scripts/cli.py"
 
-# Detect context from working directory
-context_tags="general"
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
     cd "$CLAUDE_PROJECT_DIR" 2>/dev/null || true
-fi
-
-if git rev-parse --git-dir > /dev/null 2>&1; then
-    repo=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")
-    context_tags="$repo"
-
-    # Detect language
-    if [ -f "package.json" ]; then
-        context_tags="$context_tags javascript"
-    elif [ -f "requirements.txt" ] || [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
-        context_tags="$context_tags python"
-    elif [ -f "go.mod" ]; then
-        context_tags="$context_tags go"
-    elif [ -f "Cargo.toml" ]; then
-        context_tags="$context_tags rust"
-    fi
 fi
 
 # Initialize data directory if needed
@@ -38,9 +20,12 @@ if [ ! -d "$ADAPTIVE_DIR/preferences" ]; then
     exit 0
 fi
 
-# Load preferences for this context
-prefs=$(python3 "$CLI" agent-context --context $context_tags 2>/dev/null || echo "")
+# Load hot-tier preferences with auto-detected context
+prefs=$(python3 "$CLI" agent-context --auto-detect 2>/dev/null || echo "")
 stat_line=$(python3 "$CLI" stats --oneline 2>/dev/null || echo "")
+
+# Extract context tags from auto-detect output for status line
+context_tags=$(echo "$prefs" | python3 -c "import sys,json; d=json.load(sys.stdin); print(','.join(d.get('context_tags',[])))" 2>/dev/null || echo "unknown")
 
 if [ -n "$stat_line" ]; then
     echo "Adaptive preferences: ${stat_line} | context=${context_tags}"

@@ -22,6 +22,7 @@ from scripts.models import (
 from scripts.storage import PreferenceStorageManager
 from scripts.preference_loader import PreferenceLoader
 from adaptive_preference_engine.services.signals import SignalProcessor, StrengthCalculator
+from adaptive_preference_engine.services.tiering import TieringEngine
 from scripts.config import AdaptiveConfig
 from scripts.sync import SyncRunner
 from scripts.preference_templates import list_templates, get_template
@@ -40,11 +41,12 @@ class AdaptivePreferenceCLI:
     def __init__(self, base_dir: Optional[str] = None):
         if base_dir is None:
             base_dir = str(Path.home() / ".adaptive-cli")
-        
+
         self.storage = PreferenceStorageManager(str(base_dir))
         self.loader = PreferenceLoader(self.storage)
         self.processor = SignalProcessor(self.storage)
         self.strength_calc = StrengthCalculator(self.storage)
+        self.tiering = TieringEngine(self.storage)
     
     # ---- Preference Management ----
     
@@ -276,6 +278,25 @@ class AdaptivePreferenceCLI:
                 print(f"\nWhat I learned:")
                 print(f"   You prefer: {corrected_pref.path}")
                 print(f"   Confidence: {corrected_pref.confidence:.0%}")
+
+        # Update last_signal_at and recalculate tier for affected prefs
+        affected_ids = [p["pref_id"] for p in signal.preferences_affected]
+        now = datetime.now().isoformat()
+        for pref_id in affected_ids:
+            pref = self.storage.preferences.get_preference(pref_id)
+            if pref:
+                pref.last_signal_at = now
+                old_tier = getattr(pref, 'tier', 'hot')
+                new_tier = self.tiering.classify(
+                    pref.confidence,
+                    pref.learning.use_count,
+                    getattr(pref, 'pinned', False),
+                    now
+                )
+                if new_tier != old_tier:
+                    pref.tier = new_tier
+                pref.last_updated = now
+                self.storage.preferences.save_preference(pref)
     
     def cmd_signal_feedback(self, args):
         """Process a feedback signal"""
@@ -286,11 +307,30 @@ class AdaptivePreferenceCLI:
             user_response=args.response,
             satisfaction_level=args.satisfaction
         )
-        
+
         print(f"✅ Recorded feedback signal")
         print(f"   Task: {args.task}")
         print(f"   Preferences: {', '.join(args.preferences)}")
         print(f"   Emotion: {signal.emotional_tone}")
+
+        # Update last_signal_at and recalculate tier for affected prefs
+        affected_ids = [p["pref_id"] for p in signal.preferences_affected]
+        now = datetime.now().isoformat()
+        for pref_id in affected_ids:
+            pref = self.storage.preferences.get_preference(pref_id)
+            if pref:
+                pref.last_signal_at = now
+                old_tier = getattr(pref, 'tier', 'hot')
+                new_tier = self.tiering.classify(
+                    pref.confidence,
+                    pref.learning.use_count,
+                    getattr(pref, 'pinned', False),
+                    now
+                )
+                if new_tier != old_tier:
+                    pref.tier = new_tier
+                pref.last_updated = now
+                self.storage.preferences.save_preference(pref)
     
     # ---- Loading / Display ----
     
@@ -319,20 +359,38 @@ class AdaptivePreferenceCLI:
     
     def cmd_agent_context(self, args):
         """Generate context JSON for agent"""
-        agent_json = self.loader.load_for_agent(
-            context_tags=args.context,
-            primary_pref_id=args.primary,
-            stack_contexts=args.stack
-        )
+        if args.auto_detect:
+            from adaptive_preference_engine.services.context_detection import detect_context
+            context_tags = detect_context()
+            if not context_tags:
+                context_tags = args.context or ["base"]
+
+            hot_prefs = self.loader.load_all_by_tier("hot", context_tags)
+            output = {
+                "context_tags": context_tags,
+                "hot_preferences": hot_prefs,
+                "auto_detected": True,
+                "note": "Only hot-tier preferences matching detected context"
+            }
+            agent_json = json.dumps(output, indent=2)
+        else:
+            if not args.context:
+                print("Error: --context required when not using --auto-detect")
+                return
+            agent_json = self.loader.load_for_agent(
+                context_tags=args.context,
+                primary_pref_id=args.primary,
+                stack_contexts=args.stack
+            )
+            context_tags = args.context
 
         if args.output:
             with open(args.output, 'w') as f:
                 f.write(agent_json)
             print(f"✅ Wrote agent context to {args.output}")
         else:
-            # Track last context so PreCompact hook can re-inject it (interactive sessions only)
             last_ctx_path = Path(self.storage.base_dir) / "last_context.txt"
-            last_ctx_path.write_text(" ".join(args.context), encoding="utf-8")
+            last_ctx_path.write_text(" ".join(context_tags), encoding="utf-8")
             print(agent_json)
 
     def cmd_registry(self, args):
@@ -365,6 +423,22 @@ class AdaptivePreferenceCLI:
             ),
         }
         print(json.dumps(registry, indent=2))
+
+    def cmd_load_pref(self, args):
+        result = self.loader.load_single_pref(args.path)
+        if result:
+            print(json.dumps(result, indent=2))
+        else:
+            print(json.dumps({"error": f"No preference at path: {args.path}"}))
+
+    def cmd_load_more(self, args):
+        results = self.loader.load_by_context_tag(args.context)
+        print(json.dumps(results, indent=2))
+
+    def cmd_inventory(self, args):
+        tiers = [t.strip() for t in args.tier.split(",")]
+        result = self.loader.get_inventory(tiers)
+        print(json.dumps(result, indent=2))
     
     # ---- Maintenance ----
     
@@ -1042,6 +1116,84 @@ class AdaptivePreferenceCLI:
                     if install_it not in ("n", "no"):
                         self._register_from_file(str(artifact_path), force=False)
 
+    # ---- Tier Management ----
+
+    def cmd_tier_list(self, args):
+        """List all preferences grouped by tier"""
+        all_prefs = self.storage.preferences.get_all_preferences()
+        if not all_prefs:
+            print("No preferences found.")
+            return
+
+        by_tier = {"hot": [], "warm": [], "cold": []}
+        for pref in all_prefs:
+            tier = getattr(pref, 'tier', 'hot')
+            by_tier[tier].append(pref)
+
+        print(f"\n🔥 Preference Tiers")
+        print("─" * 80)
+
+        for tier_name in ["hot", "warm", "cold"]:
+            prefs = by_tier[tier_name]
+            print(f"\n{tier_name.capitalize()} ({len(prefs)}):")
+            if not prefs:
+                print("   (none)")
+            else:
+                for pref in sorted(prefs, key=lambda p: p.confidence, reverse=True):
+                    pinned_flag = " (pinned)" if getattr(pref, 'pinned', False) else ""
+                    print(f"  * {pref.path} ({pref.confidence:.0%}{pinned_flag})")
+
+    def cmd_tier_recalculate(self, args):
+        """Recalculate tiers for all preferences"""
+        results = self.tiering.recalculate()
+        print(f"✅ Recalculated tiers")
+        print(f"   Promoted: {len(results['promoted'])}")
+        print(f"   Demoted: {len(results['demoted'])}")
+        print(f"   Unchanged: {len(results['unchanged'])}")
+
+    def cmd_tier_backfill(self, args):
+        """Backfill tier classification for existing preferences"""
+        results = self.tiering.backfill()
+        print(f"✅ Backfilled tiers")
+        print(f"   Promoted: {len(results['promoted'])}")
+        print(f"   Demoted: {len(results['demoted'])}")
+        print(f"   Unchanged: {len(results['unchanged'])}")
+
+    def cmd_tier_pin(self, args):
+        """Pin a preference to hot tier"""
+        prefs = self.storage.preferences.get_preferences_by_path(args.path)
+        if not prefs:
+            print(f"❌ No preference found at path: {args.path}")
+            return
+        pref = prefs[0]
+        if self.tiering.pin(pref.id):
+            print(f"✅ Pinned to hot: {pref.path}")
+        else:
+            print(f"⚠️  Already pinned: {pref.path}")
+
+    def cmd_tier_unpin(self, args):
+        """Unpin a preference"""
+        prefs = self.storage.preferences.get_preferences_by_path(args.path)
+        if not prefs:
+            print(f"❌ No preference found at path: {args.path}")
+            return
+        pref = prefs[0]
+        if self.tiering.unpin(pref.id):
+            print(f"✅ Unpinned: {pref.path}")
+        else:
+            print(f"⚠️  Not pinned: {pref.path}")
+
+    def cmd_tier_summary(self, args):
+        """Show tier distribution summary"""
+        summary = self.tiering.get_tier_summary()
+        total = sum(summary.values())
+        print(f"\n📊 Tier Summary ({total} preferences)")
+        print("─" * 80)
+        for tier in ["hot", "warm", "cold"]:
+            count = summary[tier]
+            pct = (count / total * 100) if total > 0 else 0
+            print(f"  {tier.capitalize()}: {count} ({pct:.0f}%)")
+
     def cmd_behavior_install(self, args):
         """Install a behavior from an APE-annotated artifact file."""
         self._register_from_file(args.path, force=args.force, non_interactive=args.non_interactive)
@@ -1511,13 +1663,24 @@ Examples:
     
     # Agent context
     agent_parser = subparsers.add_parser("agent-context", help="Generate agent context")
-    agent_parser.add_argument("--context", nargs="+", required=True)
+    agent_parser.add_argument("--context", nargs="+", default=None)
     agent_parser.add_argument("--primary", default=None)
     agent_parser.add_argument("--stack", nargs="+", default=None)
     agent_parser.add_argument("--output", default=None)
+    agent_parser.add_argument("--auto-detect", action="store_true", help="Auto-detect context from cwd")
 
     # Registry (compact session-start payload)
     subparsers.add_parser("registry", help="Emit compact preference registry for session start")
+
+    # Demand loading commands
+    load_pref_parser = subparsers.add_parser("load-pref", help="Load a single preference by path")
+    load_pref_parser.add_argument("--path", required=True, help="Preference path")
+
+    load_more_parser = subparsers.add_parser("load-more", help="Load preferences matching a context tag")
+    load_more_parser.add_argument("--context", required=True, help="Context tag to match")
+
+    inventory_parser = subparsers.add_parser("inventory", help="Show available warm/cold preferences")
+    inventory_parser.add_argument("--tier", default="warm,cold", help="Comma-separated tiers to show")
     
     # Maintenance commands
     stats_parser = subparsers.add_parser("stats", help="Show statistics")
@@ -1808,6 +1971,21 @@ Examples:
     prune_parser = subparsers.add_parser("prune", help="Find and archive stale knowledge entries")
     prune_parser.add_argument("--dry-run", action="store_true", dest="dry_run")
 
+    # tier
+    tier_parser = subparsers.add_parser("tier", help="Manage preference tiers")
+    tier_sub = tier_parser.add_subparsers(dest="tier_subcommand")
+
+    tier_sub.add_parser("list", help="List preferences grouped by tier")
+    tier_sub.add_parser("recalculate", help="Recalculate all preference tiers")
+    tier_sub.add_parser("backfill", help="Backfill tier classification for existing preferences")
+    tier_sub.add_parser("summary", help="Show tier distribution summary")
+
+    tier_pin = tier_sub.add_parser("pin", help="Pin a preference to hot tier")
+    tier_pin.add_argument("path", help="Preference path (e.g. tools.adaptive_cli.direct_path)")
+
+    tier_unpin = tier_sub.add_parser("unpin", help="Unpin a preference")
+    tier_unpin.add_argument("path", help="Preference path")
+
     # buddy
     buddy_parser = subparsers.add_parser(
         "buddy",
@@ -1972,6 +2150,31 @@ Examples:
 
         elif args.command == "prune":
             cli.cmd_knowledge_prune(args)
+
+        elif args.command == "tier":
+            if args.tier_subcommand == "list":
+                cli.cmd_tier_list(args)
+            elif args.tier_subcommand == "recalculate":
+                cli.cmd_tier_recalculate(args)
+            elif args.tier_subcommand == "backfill":
+                cli.cmd_tier_backfill(args)
+            elif args.tier_subcommand == "pin":
+                cli.cmd_tier_pin(args)
+            elif args.tier_subcommand == "unpin":
+                cli.cmd_tier_unpin(args)
+            elif args.tier_subcommand == "summary":
+                cli.cmd_tier_summary(args)
+            else:
+                tier_parser.print_help()
+
+        elif args.command == "load-pref":
+            cli.cmd_load_pref(args)
+
+        elif args.command == "load-more":
+            cli.cmd_load_more(args)
+
+        elif args.command == "inventory":
+            cli.cmd_inventory(args)
 
         else:
             parser.print_help()

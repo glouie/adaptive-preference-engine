@@ -45,15 +45,19 @@ class Preference:
     parent_id: Optional[str]     # e.g., "comm_output_format"
     name: str                    # e.g., "bullets"
     type: Literal["selector", "variant", "property"]
-    
+
     value: Optional[str] = None  # Current value (for selector/variant)
     confidence: float = 0.5      # 0.0 to 1.0
-    
+
     description: str = ""
     created: str = field(default_factory=lambda: datetime.now().isoformat())
     last_updated: str = field(default_factory=lambda: datetime.now().isoformat())
     auto_detected: bool = False
-    
+
+    tier: str = "hot"
+    pinned: bool = False
+    last_signal_at: Optional[str] = None
+
     learning: LearningData = field(default_factory=LearningData)
     
     def to_dict(self):
@@ -69,6 +73,9 @@ class Preference:
             "created": self.created,
             "last_updated": self.last_updated,
             "auto_detected": self.auto_detected,
+            "tier": self.tier,
+            "pinned": self.pinned,
+            "last_signal_at": self.last_signal_at,
             "learning": self.learning.to_dict()
         }
     

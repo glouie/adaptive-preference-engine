@@ -289,7 +289,9 @@ class PreferenceLoader:
                       primary_pref_id: Optional[str] = None,
                       stack_contexts: Optional[List[str]] = None,
                       compact: bool = False,
-                      associated_limit: int = 5) -> str:
+                      associated_limit: int = 5,
+                      tier_filter: Optional[List[str]] = None,
+                      context_filter: bool = False) -> str:
         """
         Load preferences and format for agent consumption (JSON string).
         Includes strength metadata so agent understands confidence levels.
@@ -301,7 +303,29 @@ class PreferenceLoader:
             include_trees=not compact,
             associated_limit=associated_limit if compact else None,
         )
-        
+
+        if tier_filter or context_filter:
+            from adaptive_preference_engine.services.context_detection import matches_context
+            try:
+                from scripts.config import APEConfig
+                cfg = APEConfig.load(str(self.storage.base_dir))
+                config_prefixes = cfg.get("universal_prefixes", None)
+            except Exception:
+                config_prefixes = None
+
+            def should_include(pref_entry):
+                pref_id = pref_entry.get("id")
+                if pref_id:
+                    pref_obj = self.storage.preferences.get_preference(pref_id)
+                    if pref_obj:
+                        if tier_filter and getattr(pref_obj, 'tier', 'hot') not in tier_filter:
+                            return False
+                        if context_filter and not matches_context(pref_obj.path, context_tags, config_prefixes):
+                            return False
+                return True
+
+            loaded["associated"] = [a for a in loaded["associated"] if should_include(a)]
+
         # Format for agent
         agent_context = {
             "primary_preference": loaded["primary"],
@@ -328,6 +352,85 @@ class PreferenceLoader:
             agent_context["knowledge"] = []
 
         return json.dumps(agent_context, indent=2)
+
+    def load_all_by_tier(self, tier: str = "hot", context_tags: Optional[List[str]] = None) -> List[Dict]:
+        """Load all preferences in a given tier, optionally filtered by context."""
+        all_prefs = self.storage.preferences.get_all_preferences()
+
+        try:
+            from scripts.config import APEConfig
+            cfg = APEConfig.load(str(self.storage.base_dir))
+            config_prefixes = cfg.get("universal_prefixes", None)
+        except Exception:
+            config_prefixes = None
+
+        results = []
+        for pref in all_prefs:
+            if getattr(pref, 'tier', 'hot') != tier:
+                continue
+            if context_tags:
+                from adaptive_preference_engine.services.context_detection import matches_context
+                if not matches_context(pref.path, context_tags, config_prefixes):
+                    continue
+            results.append({
+                "id": pref.id,
+                "path": pref.path,
+                "value": pref.value,
+                "confidence": pref.confidence,
+                "tier": pref.tier,
+                "pinned": getattr(pref, 'pinned', False),
+            })
+        return sorted(results, key=lambda x: x["confidence"], reverse=True)
+
+    def load_single_pref(self, pref_path: str) -> Optional[Dict[str, Any]]:
+        """Load a single preference by path, regardless of tier."""
+        prefs = self.storage.preferences.get_preferences_by_path(pref_path)
+        if not prefs:
+            return None
+        for p in prefs:
+            if p.path == pref_path:
+                return {
+                    "id": p.id,
+                    "path": p.path,
+                    "value": p.value,
+                    "confidence": p.confidence,
+                    "tier": getattr(p, 'tier', 'hot'),
+                    "pinned": getattr(p, 'pinned', False),
+                    "note": "Loaded on demand",
+                }
+        return None
+
+    def load_by_context_tag(self, tag: str) -> List[Dict[str, Any]]:
+        """Load all preferences matching a context tag, regardless of tier."""
+        from adaptive_preference_engine.services.context_detection import matches_context
+        all_prefs = self.storage.preferences.get_all_preferences()
+        results = []
+        for pref in all_prefs:
+            if matches_context(pref.path, [tag]):
+                results.append({
+                    "id": pref.id,
+                    "path": pref.path,
+                    "value": pref.value,
+                    "confidence": pref.confidence,
+                    "tier": getattr(pref, 'tier', 'hot'),
+                    "pinned": getattr(pref, 'pinned', False),
+                })
+        return sorted(results, key=lambda x: x["confidence"], reverse=True)
+
+    def get_inventory(self, tiers: Optional[List[str]] = None) -> Dict[str, List[str]]:
+        """Return preference paths grouped by tier (for agent to browse available prefs)."""
+        if tiers is None:
+            tiers = ["warm", "cold"]
+        all_prefs = self.storage.preferences.get_all_preferences()
+        inventory = {tier: [] for tier in tiers}
+        for pref in all_prefs:
+            tier = getattr(pref, 'tier', 'hot')
+            if tier in inventory:
+                inventory[tier].append(pref.path)
+        for tier in inventory:
+            inventory[tier].sort()
+        total = sum(len(paths) for paths in inventory.values())
+        return {"tiers": inventory, "total_available": total}
 
 
 class AssociationFollower:
