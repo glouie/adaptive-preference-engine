@@ -80,6 +80,18 @@ _DEFAULTS = {
         "convention": 120,
         "context": 30,
     },
+    "universal_prefixes": [
+        "workflow.git",
+        "workflow.plan_execution",
+        "workflow.progress_reporting",
+        "workflow.memory_management",
+        "workflow.persistence",
+        "workflow.skills",
+        "formatting.git_commits",
+        "general.",
+        "tools.cli",
+        "tools.adaptive_cli",
+    ],
 }
 
 

@@ -176,10 +176,10 @@ class PreferenceStorage(SQLiteDB):
                 """
                 INSERT INTO preferences
                     (id, path, parent_id, name, type, value, confidence,
-                     description, created, last_updated, auto_detected, learning)
+                     description, created, last_updated, auto_detected, tier, pinned, last_signal_at, learning)
                 VALUES
                     (:id, :path, :parent_id, :name, :type, :value, :confidence,
-                     :description, :created, :last_updated, :auto_detected, :learning)
+                     :description, :created, :last_updated, :auto_detected, :tier, :pinned, :last_signal_at, :learning)
                 ON CONFLICT(id) DO UPDATE SET
                     path           = excluded.path,
                     parent_id      = excluded.parent_id,
@@ -190,10 +190,14 @@ class PreferenceStorage(SQLiteDB):
                     description    = excluded.description,
                     last_updated   = excluded.last_updated,
                     auto_detected  = excluded.auto_detected,
+                    tier           = excluded.tier,
+                    pinned         = excluded.pinned,
+                    last_signal_at = excluded.last_signal_at,
                     learning       = excluded.learning
                 """,
                 {**d, "learning": json.dumps(d["learning"]),
-                 "auto_detected": int(d["auto_detected"])},
+                 "auto_detected": int(d["auto_detected"]),
+                 "pinned": int(d["pinned"])},
             )
 
     def get_preference(self, pref_id: str) -> Optional[Preference]:
@@ -224,6 +228,9 @@ class PreferenceStorage(SQLiteDB):
         d = dict(row)
         d["learning"] = json.loads(d["learning"])
         d["auto_detected"] = bool(d["auto_detected"])
+        d["tier"] = d.get("tier", "hot")
+        d["pinned"] = bool(d.get("pinned", 0))
+        d["last_signal_at"] = d.get("last_signal_at")
         return Preference.from_dict(d)
 
 
@@ -465,7 +472,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    _CURRENT_VERSION = 1
+    _CURRENT_VERSION = 2
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
@@ -497,14 +504,37 @@ class PreferenceStorageManager:
         ).fetchone()
         current = row[0] if row[0] is not None else 0
 
-        if current < self._CURRENT_VERSION:
-            # Version 1: initial SQLite schema (preferences, associations, contexts, signals)
+        if current < 1:
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                    (self._CURRENT_VERSION, datetime.now().isoformat()),
+                    (1, datetime.now().isoformat()),
                 )
-            print(f"  [storage] Applied migration: schema v{self._CURRENT_VERSION}")
+            print("  [storage] Applied migration: schema v1")
+
+        # Migration v2: tiering columns — check by column existence, not version
+        # (handles DBs where version was bumped past 2 before this code existed)
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(preferences)").fetchall()}
+        if "tier" not in cols:
+            try:
+                self._conn.execute("ALTER TABLE preferences ADD COLUMN tier TEXT NOT NULL DEFAULT 'hot'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._conn.execute("ALTER TABLE preferences ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._conn.execute("ALTER TABLE preferences ADD COLUMN last_signal_at TEXT")
+            except sqlite3.OperationalError:
+                pass
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_pref_tier ON preferences(tier)")
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (2, datetime.now().isoformat()),
+                )
+            print("  [storage] Applied migration: schema v2 (tiering columns)")
 
     def get_storage_info(self) -> Dict[str, Any]:
         return {

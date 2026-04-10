@@ -46,31 +46,73 @@ Agent(subagent_type="ape-buddy", prompt="record_correction task=api_design conte
 
 ---
 
-## Startup: Two-Phase Preference Loading
+## Preference Tiering
+
+Preferences are classified into three tiers based on confidence, usage, and activity:
+
+| Tier | Loaded at session start? | Criteria |
+|------|--------------------------|----------|
+| hot  | Yes                      | confidence >= 70% OR uses >= 8 OR pinned |
+| warm | No (on-demand)           | confidence >= 45% but below hot threshold |
+| cold | No (on-demand)           | confidence < 45% OR inactive 30+ days |
+
+**Tier management commands:**
+
+```bash
+adaptive-cli tier list                     # Show all prefs grouped by tier
+adaptive-cli tier summary                  # Tier distribution counts
+adaptive-cli tier recalculate              # Recalculate all tiers
+adaptive-cli tier backfill                 # Initial tier assignment
+adaptive-cli tier pin <pref_path>          # Pin to hot (immune to demotion)
+adaptive-cli tier unpin <pref_path>        # Unpin (subject to normal tiering)
+```
+
+Tiers recalculate automatically when signals are recorded. Pinned preferences never demote.
+
+---
+
+## Startup: Context-Aware Loading
 
 ### Phase 1 — Session start (automatic, via hook)
 
-A `SessionStart` hook runs `adaptive-cli registry` and injects a compact payload (~30 tokens) listing
-all known preference paths and context nodes. This gives Claude a map of what is available without
-loading full preference trees up front.
+A `SessionStart` hook runs `adaptive-cli agent-context --auto-detect` which:
+1. Detects context from the working directory (git repo, language, CLAUDE.md project name)
+2. Loads only **hot-tier** preferences matching the detected context
+3. Always includes universal prefixes (git, planning, general, CLI tools)
 
-### Phase 2 — On-demand pre-task load (standing instruction)
+This typically loads 8-12 prefs (~200-300 tokens) instead of all prefs (~600+ tokens).
 
-**Before any produce, summarize, or explain task**, silently run:
+### Phase 2 — Mid-session demand loading
+
+When the agent encounters a topic where warm/cold prefs might help, expand on demand:
 
 ```bash
-adaptive-cli agent-context --context <inferred-context>
+# Browse what's available but not loaded
+adaptive-cli inventory
+adaptive-cli inventory --tier warm,cold
+
+# Load a specific preference by path
+adaptive-cli load-pref --path tools.sharepoint.upload_method
+
+# Load all preferences matching a context tag
+adaptive-cli load-more --context sharepoint
 ```
 
-Where `<inferred-context>` is one or more tags inferred from the task — e.g., `python`, `writing`,
-`api_design`, `code_review`. This writes `~/.adaptive-cli/last_context.txt` so the PreCompact hook
-can re-inject the same context when compaction is triggered.
+All demand-loading commands output JSON for agent consumption.
 
-If no stored preferences exist yet, skip gracefully. The engine will start learning from this session.
+### Phase 3 — Explicit context override
 
-**Apply what you load:** If preferences indicate `communication.output_format.table` at high confidence,
-use tables. If `communication.depth.detailed` is preferred, be thorough. Let the loaded preferences
-silently shape your response style.
+If auto-detection misses the right context, override manually:
+
+```bash
+adaptive-cli agent-context --context python api_design
+```
+
+This writes `~/.adaptive-cli/last_context.txt` so the PreCompact hook can re-inject the same
+context when compaction is triggered.
+
+**Apply what you load:** Let the loaded preferences silently shape your response style. If no
+stored preferences exist yet, skip gracefully.
 
 ### Compact preservation
 
