@@ -156,8 +156,16 @@ def record_correction(cli_path, task, context, proposed, corrected, message):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            preview = corrected[:80].replace("\n", " ")
-            print(f"APE: recorded signal — {preview}")
+            output = result.stdout.strip()
+            if "Matched to existing preference" in output:
+                # Extract preference path from CLI output for concise display
+                for line in output.splitlines():
+                    if "Preference:" in line:
+                        print(f"APE: strengthened existing pref — {line.split('Preference:')[1].strip()}")
+                        break
+            else:
+                preview = corrected[:80].replace("\n", " ")
+                print(f"APE: recorded signal — {preview}")
     except Exception:
         pass
 

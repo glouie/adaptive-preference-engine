@@ -122,12 +122,99 @@ class FrictionMetrics:
         return operations
 
 
+class PreferenceMatchResult:
+    """Result of matching a correction against existing preferences."""
+
+    def __init__(self, matched: bool, preference=None, similarity: float = 0.0,
+                 match_type: str = "none"):
+        self.matched = matched
+        self.preference = preference
+        self.similarity = similarity
+        self.match_type = match_type  # "path", "value_keyword", "none"
+
+
 class SignalProcessor:
     """Process behavioral signals to update preferences and associations"""
+
+    # Minimum keyword overlap ratio to consider a match
+    MATCH_THRESHOLD = 0.35
 
     def __init__(self, storage_manager: PreferenceStorageManager):
         self.storage = storage_manager
         self._bayesian_calc = BayesianStrengthCalculator()
+
+    # ---- Preference Matching ----
+
+    def match_existing_preference(self, correction_text: str,
+                                   task: str = "") -> PreferenceMatchResult:
+        """Match a correction against existing preferences.
+
+        Checks path overlap first, then keyword overlap against preference
+        values. Returns the best match above MATCH_THRESHOLD.
+        """
+        all_prefs = self.storage.preferences.get_all_preferences()
+        if not all_prefs:
+            return PreferenceMatchResult(matched=False)
+
+        correction_words = self._tokenize(correction_text)
+        if not correction_words:
+            return PreferenceMatchResult(matched=False)
+
+        best_match = None
+        best_score = 0.0
+        best_type = "none"
+
+        for pref in all_prefs:
+            # Path-based matching: compare task/correction words against path segments
+            path_words = set(pref.path.replace(".", " ").replace("_", " ").lower().split())
+            path_overlap = len(correction_words & path_words) / max(len(path_words), 1)
+
+            # Value-based matching: keyword overlap with preference value
+            value_words = self._tokenize(pref.value or "")
+            if value_words:
+                overlap = len(correction_words & value_words)
+                value_score = overlap / max(min(len(correction_words), len(value_words)), 1)
+            else:
+                value_score = 0.0
+
+            # Take the better of path and value match
+            if path_overlap >= value_score and path_overlap > best_score:
+                best_score = path_overlap
+                best_match = pref
+                best_type = "path"
+            elif value_score > best_score:
+                best_score = value_score
+                best_match = pref
+                best_type = "value_keyword"
+
+        if best_score >= self.MATCH_THRESHOLD and best_match is not None:
+            return PreferenceMatchResult(
+                matched=True,
+                preference=best_match,
+                similarity=best_score,
+                match_type=best_type,
+            )
+
+        return PreferenceMatchResult(matched=False, similarity=best_score)
+
+    @staticmethod
+    def _tokenize(text: str) -> set:
+        """Extract lowercase keyword tokens, dropping stop words."""
+        stop_words = {
+            "a", "an", "the", "is", "are", "was", "were", "be", "been",
+            "being", "have", "has", "had", "do", "does", "did", "will",
+            "would", "could", "should", "may", "might", "must", "shall",
+            "can", "to", "of", "in", "for", "on", "with", "at", "by",
+            "from", "as", "into", "through", "during", "before", "after",
+            "and", "but", "or", "nor", "not", "so", "yet", "both",
+            "either", "neither", "each", "every", "all", "any", "few",
+            "more", "most", "other", "some", "such", "no", "only", "own",
+            "same", "than", "too", "very", "just", "because", "if", "when",
+            "that", "this", "it", "its", "i", "me", "my", "we", "our",
+            "you", "your", "he", "she", "they", "them", "their",
+        }
+        words = set(re.findall(r"[a-z][a-z0-9_]+", text.lower()))
+        return words - stop_words
 
     def _create_metrics_tracker(self) -> FrictionMetrics:
         """Create a metrics tracker scoped to this storage manager."""
@@ -161,7 +248,11 @@ class SignalProcessor:
         """
         Process a correction event where user overrides agent's choice.
 
-        This is a KEY learning signal - user disagreed with agent's preference.
+        Before creating a new correction signal, attempts to match the
+        correction text against existing preferences. If a strong match
+        is found, the signal is routed as a confirmation that strengthens
+        the existing preference (and optionally expands its value), rather
+        than creating a blind new correction signal.
         """
         # Track metrics
         metrics = self._create_metrics_tracker()
@@ -169,6 +260,22 @@ class SignalProcessor:
         success = False
 
         try:
+            # --- Preference matching: check if this correction maps to an existing pref ---
+            match = self.match_existing_preference(user_corrected_to, task)
+            if match.matched and match.preference is not None:
+                return self._route_as_confirmation(
+                    match=match,
+                    task=task,
+                    context_tags=context_tags,
+                    agent_proposed=agent_proposed,
+                    user_corrected_to=user_corrected_to,
+                    user_message=user_message,
+                    metrics=metrics,
+                    start_time=start_time,
+                )
+
+            # --- No match: proceed with standard correction flow ---
+
             # Detect emotional tone from message
             emotional_tone = self._detect_emotional_tone(user_message)
             emotional_indicators = self._extract_emotional_indicators(user_message)
@@ -352,6 +459,68 @@ class SignalProcessor:
         finally:
             self._record_attempt_metrics(metrics, "feedback", success, start_time)
     
+    # ---- Confirmation Routing ----
+
+    def _route_as_confirmation(self, match: PreferenceMatchResult,
+                                task: str, context_tags: List[str],
+                                agent_proposed: str, user_corrected_to: str,
+                                user_message: str, metrics: FrictionMetrics,
+                                start_time: datetime) -> Signal:
+        """Route a correction as a confirmation of an existing preference.
+
+        Instead of creating a new correction signal, this:
+        1. Boosts the matched preference's confidence
+        2. Records a feedback signal (type="feedback") referencing the pref
+        3. Returns the signal with match metadata for CLI display
+        """
+        pref = match.preference
+        emotional_tone = self._detect_emotional_tone(user_message)
+        emotional_indicators = self._extract_emotional_indicators(user_message)
+
+        # Boost confidence on the matched preference (+0.05 per confirmation)
+        new_confidence = min(pref.confidence + 0.05, 1.0)
+        pref.confidence = new_confidence
+        pref.learning.use_count += 1
+        pref.learning.last_used = datetime.now().isoformat()
+        pref.last_updated = datetime.now().isoformat()
+        self.storage.preferences.save_preference(pref)
+
+        # Create a feedback signal (not correction) referencing the matched pref
+        signal = Signal(
+            id=generate_id("sig"),
+            timestamp=datetime.now().isoformat(),
+            type="feedback",
+            task=task,
+            context_tags=context_tags,
+            user_response=(
+                f"[auto-matched to {pref.path} ({match.match_type}, "
+                f"similarity={match.similarity:.0%})]\n{user_corrected_to}"
+            ),
+            emotional_tone=emotional_tone,
+            emotional_indicators=emotional_indicators,
+            preferences_used=[pref.id],
+        )
+        signal.preferences_affected = [{
+            "pref_id": pref.id,
+            "action": "confirm_strengthen",
+            "new_confidence": new_confidence,
+            "match_similarity": match.similarity,
+            "match_type": match.match_type,
+        }]
+
+        self.storage.signals.save_signal(signal)
+
+        # Record habit usage
+        try:
+            context = context_tags[0] if context_tags else "general"
+            tracker = HabitTracker(self.storage.base_dir)
+            tracker.record_usage(context)
+        except Exception as e:
+            logging.warning(f"Confirmation routing failed during habit tracking: {e}")
+
+        self._record_attempt_metrics(metrics, "confirmation_routed", True, start_time)
+        return signal
+
     # ---- Helper Methods ----
 
     def _resolve_preferences_used(
