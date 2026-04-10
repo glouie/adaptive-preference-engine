@@ -246,18 +246,36 @@ class AdaptivePreferenceCLI:
             user_message=args.message or ""
         )
 
-        print(f"✅ Recorded correction signal")
-        print(f"   Task: {args.task}")
-        print(f"   Proposed: {args.proposed} → Corrected: {args.corrected}")
-        print(f"   Emotion: {signal.emotional_tone}")
-        print(f"   Associations updated: {len(signal.associations_affected)}")
+        # Check if the signal was routed as a confirmation of an existing pref
+        was_routed = (
+            signal.type == "feedback"
+            and signal.preferences_affected
+            and signal.preferences_affected[0].get("action") == "confirm_strengthen"
+        )
 
-        # Show what the system learned from this correction
-        corrected_pref = self.storage.preferences.get_preference(args.corrected)
-        if corrected_pref:
-            print(f"\nWhat I learned:")
-            print(f"   You prefer: {corrected_pref.path}")
-            print(f"   Confidence: {corrected_pref.confidence:.0%}")
+        if was_routed:
+            match_info = signal.preferences_affected[0]
+            pref_id = match_info["pref_id"]
+            matched_pref = self.storage.preferences.get_preference(pref_id)
+            pref_path = matched_pref.path if matched_pref else pref_id
+            print(f"🔗 Matched to existing preference (not a new signal)")
+            print(f"   Preference: {pref_path}")
+            print(f"   Match type: {match_info['match_type']} ({match_info['match_similarity']:.0%} similarity)")
+            print(f"   Confidence: {match_info['new_confidence']:.0%} (strengthened)")
+            print(f"   Task: {args.task}")
+        else:
+            print(f"✅ Recorded correction signal")
+            print(f"   Task: {args.task}")
+            print(f"   Proposed: {args.proposed} → Corrected: {args.corrected}")
+            print(f"   Emotion: {signal.emotional_tone}")
+            print(f"   Associations updated: {len(signal.associations_affected)}")
+
+            # Show what the system learned from this correction
+            corrected_pref = self.storage.preferences.get_preference(args.corrected)
+            if corrected_pref:
+                print(f"\nWhat I learned:")
+                print(f"   You prefer: {corrected_pref.path}")
+                print(f"   Confidence: {corrected_pref.confidence:.0%}")
     
     def cmd_signal_feedback(self, args):
         """Process a feedback signal"""
