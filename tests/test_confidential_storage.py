@@ -64,3 +64,26 @@ class TestConfidentialStorage:
         meta = confidential_mgr.get_sync_meta()
         assert meta["last_push_at"] == "2026-04-14T12:00:00"
         assert meta["last_pull_at"] is None
+
+
+from scripts.confidential_classifier import is_confidential
+
+
+class TestPatternClassification:
+    def test_matches_notes_vault(self):
+        assert is_confidential("Path is ~/notes-vault/webex/meeting.md") is True
+
+    def test_matches_users_path(self):
+        assert is_confidential("Config at /Users/glouie/.config/foo") is True
+
+    def test_matches_internal_url(self):
+        assert is_confidential("Dashboard at cd.splunkdev.com/grafana") is True
+
+    def test_matches_cisco_email(self):
+        assert is_confidential("Contact glouie@cisco.com") is True
+
+    def test_no_match_generic_content(self):
+        assert is_confidential("Use pytest for testing Python code") is False
+
+    def test_custom_patterns(self):
+        assert is_confidential("secret-project", patterns=["secret-project"]) is True
