@@ -1519,6 +1519,162 @@ class AdaptivePreferenceCLI:
             self.storage.knowledge.archive_entry(e.id)
         print(f"Archived {len(candidates)} entries.")
 
+    def cmd_knowledge_expire(self, args):
+        """Archive expired entries from both public and confidential stores."""
+        count = self.storage.knowledge.archive_expired()
+        # Also check confidential DB
+        conf_count = 0
+        try:
+            from scripts.storage import ConfidentialStorageManager
+            conf_mgr = ConfidentialStorageManager()
+            conf_count = conf_mgr.knowledge.archive_expired()
+            conf_mgr.close()
+        except Exception:
+            pass
+        if not getattr(args, "quiet", False):
+            total = count + conf_count
+            if total > 0:
+                print(f"Archived {total} expired entries ({count} public, {conf_count} confidential)")
+            else:
+                print("No expired entries found")
+
+    def cmd_knowledge_ingest_inbox(self, args):
+        """Ingest memory inbox files into knowledge stores."""
+        import os
+        from scripts.inbox_ingester import ingest_inbox
+        from scripts.storage import ConfidentialStorageManager
+        inbox = Path(os.path.expanduser("~/.adaptive-cli/memory-inbox"))
+        try:
+            conf_mgr = ConfidentialStorageManager()
+        except Exception:
+            conf_mgr = None
+        count = ingest_inbox(inbox, self.storage, conf_mgr)
+        if conf_mgr:
+            conf_mgr.close()
+        if not getattr(args, "quiet", False) and count > 0:
+            print(f"Ingested {count} entries from inbox")
+
+    def cmd_knowledge_generate_memory(self, args):
+        """Generate memory files for Claude Code from knowledge stores."""
+        from scripts.memory_generator import generate_memory_files
+        from scripts.storage import ConfidentialStorageManager
+        try:
+            conf_mgr = ConfidentialStorageManager()
+        except Exception:
+            conf_mgr = None
+        memory_dir = Path(args.memory_dir)
+        count = generate_memory_files(self.storage, conf_mgr, memory_dir)
+        if conf_mgr:
+            conf_mgr.close()
+        if not getattr(args, "quiet", False):
+            print(f"Generated {count} memory files in {memory_dir}")
+
+    def cmd_knowledge_import_memory(self, args):
+        """Import existing Claude Code memory files into knowledge stores."""
+        import os
+        import hashlib
+        from scripts.memory_generator import parse_memory_file
+        from scripts.confidential_classifier import is_confidential
+        from scripts.storage import ConfidentialStorageManager
+        from adaptive_preference_engine.knowledge import KnowledgeEntry
+
+        try:
+            conf_mgr = ConfidentialStorageManager()
+        except Exception:
+            conf_mgr = None
+
+        claude_projects = Path.home() / ".claude" / "projects"
+        if not claude_projects.exists():
+            print("No Claude Code projects found")
+            return
+
+        imported = 0
+        skipped = 0
+        for memory_dir in claude_projects.glob("*/memory"):
+            for md_file in memory_dir.glob("*.md"):
+                if md_file.name == "MEMORY.md":
+                    continue
+                parsed = parse_memory_file(md_file)
+                title = parsed["name"]
+                content = parsed["content"]
+                category = parsed["category"]
+                partition = parsed["partition"]
+
+                # Dedup
+                data = f"{title}\n{content}\n{category}\n{partition}"
+                ch = hashlib.sha256(data.encode()).hexdigest()
+                exists = False
+                for m in (self.storage, conf_mgr):
+                    if m is None:
+                        continue
+                    store = m.knowledge if hasattr(m, 'knowledge') else m
+                    for e in store.get_all_entries(include_archived=True):
+                        h = hashlib.sha256(
+                            f"{e.title}\n{e.content}\n{e.category}\n{e.partition}".encode()
+                        ).hexdigest()
+                        if h == ch:
+                            exists = True
+                            break
+                    if exists:
+                        break
+
+                if exists:
+                    skipped += 1
+                    continue
+
+                target = conf_mgr if (conf_mgr and is_confidential(content)) else self.storage
+                entry = KnowledgeEntry(
+                    id=generate_id("know"),
+                    partition=partition,
+                    category=category,
+                    title=title,
+                    tags=[],
+                    content=content,
+                    token_estimate=len(content.split()),
+                )
+                target.knowledge.save_entry(entry)
+                imported += 1
+
+        if conf_mgr:
+            conf_mgr.close()
+        if not getattr(args, "quiet", False):
+            print(f"Imported {imported} entries ({skipped} duplicates skipped)")
+
+    def cmd_knowledge_migrate_confidential(self, args):
+        """Migrate confidential YAML store to SQLite."""
+        import os
+        import yaml
+        from scripts.storage import ConfidentialStorageManager
+        from adaptive_preference_engine.knowledge import KnowledgeEntry
+
+        conf_mgr = ConfidentialStorageManager()
+        yaml_path = Path(os.path.expanduser("~/gitlab/gskills/.ape-confidential/knowledge.yaml"))
+
+        if not yaml_path.exists():
+            print("No confidential YAML store found — nothing to migrate")
+            conf_mgr.close()
+            return
+
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f) or []
+
+        migrated = 0
+        for item in data:
+            entry = KnowledgeEntry(
+                id=item.get("id", generate_id("know")),
+                partition=item.get("partition", "confidential"),
+                category=item.get("category", "context"),
+                title=item.get("title", "Untitled"),
+                tags=item.get("tags", []),
+                content=item.get("content", ""),
+                token_estimate=len(item.get("content", "").split()),
+            )
+            conf_mgr.knowledge.save_entry(entry)
+            migrated += 1
+
+        conf_mgr.close()
+        print(f"Migrated {migrated} entries from YAML to ape-confidential.db")
+
     def cmd_behavior_setup(self, args):
         """Run setup_script for each behavior (or the named one)."""
         import subprocess
@@ -1984,6 +2140,22 @@ Examples:
     know_restore = knowledge_sub.add_parser("restore", help="Restore an archived entry")
     know_restore.add_argument("entry_id", help="Entry ID")
 
+    know_expire = knowledge_sub.add_parser("expire", help="Archive expired entries")
+    know_expire.add_argument("--quiet", action="store_true")
+
+    know_ingest = knowledge_sub.add_parser("ingest-inbox", help="Ingest pending memory inbox files")
+    know_ingest.add_argument("--quiet", action="store_true")
+
+    know_genmem = knowledge_sub.add_parser("generate-memory", help="Generate memory .md files")
+    know_genmem.add_argument("--memory-dir", required=True, help="Target memory directory")
+    know_genmem.add_argument("--quiet", action="store_true")
+
+    know_import = knowledge_sub.add_parser("import-memory", help="Import existing Claude Code memory")
+    know_import.add_argument("--scan", action="store_true", help="Scan all project memory dirs")
+    know_import.add_argument("--quiet", action="store_true")
+
+    know_migrate = knowledge_sub.add_parser("migrate-confidential", help="Migrate confidential YAML store to SQLite")
+
     # Top-level prune
     prune_parser = subparsers.add_parser("prune", help="Find and archive stale knowledge entries")
     prune_parser.add_argument("--dry-run", action="store_true", dest="dry_run")
@@ -2162,6 +2334,16 @@ Examples:
                 cli.cmd_knowledge_archive(args)
             elif args.knowledge_subcommand == "restore":
                 cli.cmd_knowledge_restore(args)
+            elif args.knowledge_subcommand == "expire":
+                cli.cmd_knowledge_expire(args)
+            elif args.knowledge_subcommand == "ingest-inbox":
+                cli.cmd_knowledge_ingest_inbox(args)
+            elif args.knowledge_subcommand == "generate-memory":
+                cli.cmd_knowledge_generate_memory(args)
+            elif args.knowledge_subcommand == "import-memory":
+                cli.cmd_knowledge_import_memory(args)
+            elif args.knowledge_subcommand == "migrate-confidential":
+                cli.cmd_knowledge_migrate_confidential(args)
             else:
                 knowledge_parser.print_help()
 
