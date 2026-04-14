@@ -1335,6 +1335,16 @@ class AdaptivePreferenceCLI:
     def cmd_knowledge_add(self, args):
         import socket
         from adaptive_preference_engine.knowledge import KnowledgeEntry
+
+        # Validate expires_when_tag if provided
+        if args.expires_when_tag:
+            from scripts.tag_validation import validate_tag
+            if not validate_tag(args.expires_when_tag):
+                print(f"ERROR: Invalid tag '{args.expires_when_tag}'. "
+                      "Tags must match [a-zA-Z0-9][a-zA-Z0-9.-]* "
+                      "(no underscores or percent signs).", file=sys.stderr)
+                return
+
         entry = KnowledgeEntry(
             id=generate_id("know"),
             partition=args.partition,
@@ -1347,6 +1357,9 @@ class AdaptivePreferenceCLI:
             machine_origin=socket.gethostname(),
             decay_exempt=args.decay_exempt,
             token_estimate=len(args.content) // 4,
+            expires_at=getattr(args, 'expires_at', None),
+            expires_when=getattr(args, 'expires_when', None),
+            expires_when_tag=getattr(args, 'expires_when_tag', None),
         )
         self.storage.knowledge.save_entry(entry)
         print(f"Added: [{entry.partition}] {entry.title} ({entry.id})")
@@ -1947,6 +1960,10 @@ Examples:
     know_add.add_argument("--tags", nargs="+", default=[], help="Tags for discovery")
     know_add.add_argument("--confidence", type=float, default=1.0)
     know_add.add_argument("--decay-exempt", action="store_true", dest="decay_exempt")
+    know_add.add_argument("--expires-at", help="ISO date for calendar-based expiry (YYYY-MM-DD)")
+    know_add.add_argument("--expires-when", help="Human-readable expiry trigger description")
+    know_add.add_argument("--expires-when-tag", help="Signal tag to watch for event-based expiry")
+    know_add.add_argument("--confidential", action="store_true", help="Route to confidential store")
 
     know_search = knowledge_sub.add_parser("search", help="Search knowledge entries")
     know_search.add_argument("query", help="Search query (matches title, content, tags)")
