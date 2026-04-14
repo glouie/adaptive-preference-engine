@@ -538,43 +538,47 @@ class AdaptivePreferenceCLI:
         """Export SQLite → JSONL and push to git remote."""
         cfg = AdaptiveConfig(str(self.storage.base_dir))
         if not cfg.sync_repo_path:
-            print("❌ No sync repo configured.")
-            print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
+            if not getattr(args, "quiet", False):
+                print("❌ No sync repo configured.")
+                print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
             return
         runner = SyncRunner(self.storage, cfg.sync_repo_path)
         result = runner.push()
-        if result["status"] == "up-to-date":
-            print("⚠️  Nothing to push — preferences are already up to date.")
-        else:
-            c = result["counts"]
-            if result["status"] == "pushed":
-                print("✅ Preferences pushed to sync repo.")
+        if not getattr(args, "quiet", False):
+            if result["status"] == "up-to-date":
+                print("⚠️  Nothing to push — preferences are already up to date.")
             else:
-                print("✅ Preferences exported and committed (no remote configured).")
-            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
-                  f"{c['contexts']} contexts, {c['signals']} signals")
-            if result.get("git_push_error"):
-                print(f"⚠️  git push failed: {result['git_push_error']}")
+                c = result["counts"]
+                if result["status"] == "pushed":
+                    print("✅ Preferences pushed to sync repo.")
+                else:
+                    print("✅ Preferences exported and committed (no remote configured).")
+                print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                      f"{c['contexts']} contexts, {c['signals']} signals")
+                if result.get("git_push_error"):
+                    print(f"⚠️  git push failed: {result['git_push_error']}")
 
     def cmd_sync_pull(self, args):
         """Pull from git remote and import JSONL → SQLite."""
         cfg = AdaptiveConfig(str(self.storage.base_dir))
         if not cfg.sync_repo_path:
-            print("❌ No sync repo configured.")
-            print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
+            if not getattr(args, "quiet", False):
+                print("❌ No sync repo configured.")
+                print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
             return
         runner = SyncRunner(self.storage, cfg.sync_repo_path)
         result = runner.pull()
-        c = result["counts"]
-        if result.get("git_pull_error"):
-            print(f"❌ git pull failed: {result['git_pull_error']}")
-            print("⚠️  Importing from local (possibly stale) repo state.")
-            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
-                  f"{c['contexts']} contexts, {c['signals']} signals imported from local state")
-        else:
-            print("✅ Preferences pulled from sync repo.")
-            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
-                  f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
+        if not getattr(args, "quiet", False):
+            c = result["counts"]
+            if result.get("git_pull_error"):
+                print(f"❌ git pull failed: {result['git_pull_error']}")
+                print("⚠️  Importing from local (possibly stale) repo state.")
+                print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                      f"{c['contexts']} contexts, {c['signals']} signals imported from local state")
+            else:
+                print("✅ Preferences pulled from sync repo.")
+                print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                      f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
 
     def cmd_sync_status(self, args):
         """Show sync repo git status."""
@@ -1545,8 +1549,9 @@ class AdaptivePreferenceCLI:
             conf_mgr = ConfidentialStorageManager()
             conf_count = conf_mgr.knowledge.archive_expired()
             conf_mgr.close()
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Confidential expiry failed: {e}")
         if not getattr(args, "quiet", False):
             total = count + conf_count
             if total > 0:
@@ -1887,8 +1892,11 @@ Examples:
     sync_cfg.add_argument("--repo-path", required=True,
                           help="Path to the git repo directory containing JSONL exports")
 
-    sync_sub.add_parser("push", help="Export to JSONL and push to remote")
-    sync_sub.add_parser("pull", help="Pull from remote and import into local SQLite")
+    sync_push = sync_sub.add_parser("push", help="Export to JSONL and push to remote")
+    sync_push.add_argument("--quiet", action="store_true", help="Suppress output")
+
+    sync_pull = sync_sub.add_parser("pull", help="Pull from remote and import into local SQLite")
+    sync_pull.add_argument("--quiet", action="store_true", help="Suppress output")
     sync_sub.add_parser("status", help="Show sync repo git status")
 
     # onboard
