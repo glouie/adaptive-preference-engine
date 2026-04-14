@@ -17,14 +17,15 @@ def _content_hash(title: str, content: str, category: str, partition: str) -> st
 
 
 def _entry_exists(public_mgr, confidential_mgr, content_hash: str) -> bool:
-    """Check if an entry with this content hash exists in either DB."""
+    """Check if an entry with this content hash exists in either DB using O(1) index lookup."""
     for mgr in (public_mgr, confidential_mgr):
         if mgr is None:
             continue
-        for entry in mgr.knowledge.get_all_entries(include_archived=True):
-            h = _content_hash(entry.title, entry.content, entry.category, entry.partition)
-            if h == content_hash:
-                return True
+        row = mgr.knowledge._conn.execute(
+            "SELECT 1 FROM knowledge WHERE content_hash = ? LIMIT 1", (content_hash,)
+        ).fetchone()
+        if row:
+            return True
     return False
 
 

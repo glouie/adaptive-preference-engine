@@ -19,6 +19,7 @@ class JSONLStorageReadError(Exception):
         self.errors = errors
         super().__init__(f"Malformed JSONL in {filepath}: {errors}")
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -118,11 +119,13 @@ CREATE TABLE IF NOT EXISTS knowledge (
     created_at      TEXT NOT NULL,
     last_used       TEXT NOT NULL,
     archived        INTEGER DEFAULT 0,
-    ref_path        TEXT
+    ref_path        TEXT,
+    content_hash    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
 CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
 CREATE INDEX IF NOT EXISTS idx_know_archived  ON knowledge(archived);
+CREATE INDEX IF NOT EXISTS idx_know_content_hash ON knowledge(content_hash);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     version     INTEGER NOT NULL,
@@ -550,6 +553,9 @@ class KnowledgeStorage(SQLiteDB):
 
     def save_entry(self, entry: KnowledgeEntry) -> None:
         d = entry.to_dict()
+        # Compute content hash for deduplication
+        hash_data = f"{entry.title}\n{entry.content}\n{entry.category}\n{entry.partition}"
+        content_hash = hashlib.sha256(hash_data.encode("utf-8")).hexdigest()
         with self._conn:
             self._conn.execute(
                 """
@@ -557,12 +563,12 @@ class KnowledgeStorage(SQLiteDB):
                     (id, partition, category, title, tags, content, confidence,
                      source, machine_origin, decay_exempt, access_count,
                      token_estimate, created_at, last_used, archived, ref_path,
-                     expires_at, expires_when, expires_when_tag)
+                     expires_at, expires_when, expires_when_tag, content_hash)
                 VALUES
                     (:id, :partition, :category, :title, :tags, :content, :confidence,
                      :source, :machine_origin, :decay_exempt, :access_count,
                      :token_estimate, :created_at, :last_used, :archived, :ref_path,
-                     :expires_at, :expires_when, :expires_when_tag)
+                     :expires_at, :expires_when, :expires_when_tag, :content_hash)
                 ON CONFLICT(id) DO UPDATE SET
                     partition       = excluded.partition,
                     category        = excluded.category,
@@ -580,13 +586,15 @@ class KnowledgeStorage(SQLiteDB):
                     ref_path        = excluded.ref_path,
                     expires_at      = excluded.expires_at,
                     expires_when    = excluded.expires_when,
-                    expires_when_tag = excluded.expires_when_tag
+                    expires_when_tag = excluded.expires_when_tag,
+                    content_hash    = excluded.content_hash
                 """,
                 {
                     **d,
                     "tags": json.dumps(d["tags"]),
                     "decay_exempt": int(d["decay_exempt"]),
                     "archived": int(d["archived"]),
+                    "content_hash": content_hash,
                 },
             )
 
@@ -721,7 +729,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    _CURRENT_VERSION = 6
+    _CURRENT_VERSION = 7
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
@@ -868,6 +876,21 @@ class PreferenceStorageManager:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (6, datetime.now().isoformat()),
+                )
+
+        if current < 7:
+            # v7: content_hash column + index for O(1) deduplication
+            try:
+                self._conn.execute("ALTER TABLE knowledge ADD COLUMN content_hash TEXT")
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists (fresh DB)
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_know_content_hash ON knowledge(content_hash)")
+            self._conn.commit()
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (7, datetime.now().isoformat()),
                 )
 
     def get_storage_info(self) -> Dict[str, Any]:
@@ -1043,11 +1066,13 @@ class ConfidentialStorageManager:
                 ref_path        TEXT,
                 expires_at      TEXT,
                 expires_when    TEXT,
-                expires_when_tag TEXT
+                expires_when_tag TEXT,
+                content_hash    TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
             CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
             CREATE INDEX IF NOT EXISTS idx_know_archived  ON knowledge(archived);
+            CREATE INDEX IF NOT EXISTS idx_know_content_hash ON knowledge(content_hash);
             CREATE TABLE IF NOT EXISTS sync_meta (
                 last_push_at TEXT,
                 last_pull_at TEXT

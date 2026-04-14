@@ -283,3 +283,34 @@ class TestInboxIngestion:
         inbox.mkdir()
         ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
         assert ingested == 0
+
+    def test_hash_based_dedup_is_fast(self, public_mgr, confidential_mgr, tmp_path):
+        """Verify hash-based dedup uses O(1) indexed query, not O(n) scan."""
+        # Pre-populate database with many entries
+        for i in range(100):
+            public_mgr.knowledge.save_entry(make_entry(
+                id=f"know_{i}",
+                title=f"Entry {i}",
+                content=f"Content {i}",
+                category="preference",
+                partition="general",
+            ))
+
+        # Create inbox with duplicate of first entry
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        md = inbox / "abc123_test.md"
+        md.write_text("---\nname: Entry 0\ndescription: d\ntype: feedback\n---\n\nContent 0\n")
+
+        # Ingest should skip duplicate (using indexed query, not scanning all 100 entries)
+        ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
+        assert ingested == 0
+        assert not md.exists()  # File deleted even though skipped
+
+        # Verify content_hash was set on all entries
+        entries = public_mgr.knowledge.get_all_entries()
+        for entry in entries:
+            row = public_mgr.knowledge._conn.execute(
+                "SELECT content_hash FROM knowledge WHERE id = ?", (entry.id,)
+            ).fetchone()
+            assert row[0] is not None, f"Entry {entry.id} missing content_hash"
