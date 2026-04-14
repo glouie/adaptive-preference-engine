@@ -1,5 +1,6 @@
 """Tests for memory consolidation. Run: pytest tests/test_memory_consolidation.py -v"""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from scripts.storage import PreferenceStorageManager, ConfidentialStorageManager
 from scripts.memory_generator import generate_memory_files, parse_memory_file
+from scripts.inbox_ingester import ingest_inbox
 from adaptive_preference_engine.knowledge import KnowledgeEntry
 from scripts.models import generate_id
 
@@ -194,3 +196,55 @@ class TestMemoryIntercept:
         )
         assert result.returncode == 0
         assert len(list(inbox.glob("*"))) == 0
+
+
+class TestInboxIngestion:
+    def test_ingests_feedback_to_public(self, public_mgr, confidential_mgr, tmp_path):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        md = inbox / "abc123_feedback_test.md"
+        md.write_text("---\nname: Test Rule\ndescription: d\ntype: feedback\n---\n\nAlways test.\n")
+        ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
+        assert ingested == 1
+        entries = public_mgr.knowledge.get_all_entries()
+        assert len(entries) == 1
+        assert entries[0].title == "Test Rule"
+        assert entries[0].category == "preference"
+        # Inbox file should be deleted after ingestion
+        assert not md.exists()
+
+    def test_routes_confidential_content(self, public_mgr, confidential_mgr, tmp_path):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        md = inbox / "abc123_user_paths.md"
+        md.write_text("---\nname: Paths\ndescription: d\ntype: user\n---\n\n/Users/glouie/notes\n")
+        ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
+        assert ingested == 1
+        # Should be in confidential due to /Users/ pattern
+        assert len(confidential_mgr.knowledge.get_all_entries()) == 1
+        assert len(public_mgr.knowledge.get_all_entries()) == 0
+
+    def test_dedup_skips_existing(self, public_mgr, confidential_mgr, tmp_path):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        # First ingest
+        md = inbox / "abc123_test.md"
+        md.write_text("---\nname: Dup\ndescription: d\ntype: feedback\n---\n\nContent\n")
+        ingest_inbox(inbox, public_mgr, confidential_mgr)
+        # Second ingest of same content
+        md.write_text("---\nname: Dup\ndescription: d\ntype: feedback\n---\n\nContent\n")
+        ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
+        assert ingested == 0  # Skipped as duplicate
+
+    def test_skips_tmp_files(self, public_mgr, confidential_mgr, tmp_path):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        (inbox / ".partial.tmp").write_text("incomplete")
+        ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
+        assert ingested == 0
+
+    def test_empty_inbox(self, public_mgr, confidential_mgr, tmp_path):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
+        assert ingested == 0
