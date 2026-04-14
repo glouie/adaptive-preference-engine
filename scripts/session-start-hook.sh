@@ -20,6 +20,34 @@ if [ ! -d "$ADAPTIVE_DIR/preferences" ]; then
     exit 0
 fi
 
+# --- Temporal expiry: archive expired entries in both DBs ---
+python3 "$CLI" knowledge expire --quiet 2>/dev/null || true
+
+# --- Inbox: ingest any pending memory files from crashed sessions ---
+python3 "$CLI" knowledge ingest-inbox --quiet 2>/dev/null || true
+
+# --- Memory generation: generate .md files for Claude Code ---
+# Discover project memory directory
+CLAUDE_PROJECT_MEMORY_DIR=""
+for dir in "$HOME/.claude/projects"/*/memory; do
+    if [ -d "$dir" ]; then
+        project_dir="$(dirname "$dir")"
+        if [ -f "$project_dir/.project_path" ]; then
+            stored_path="$(cat "$project_dir/.project_path" 2>/dev/null)"
+            if [ "$stored_path" = "$PWD" ]; then
+                CLAUDE_PROJECT_MEMORY_DIR="$dir"
+                break
+            fi
+        fi
+    fi
+done
+export CLAUDE_PROJECT_MEMORY_DIR
+
+if [ -n "$CLAUDE_PROJECT_MEMORY_DIR" ]; then
+    python3 "$CLI" knowledge generate-memory \
+        --memory-dir "$CLAUDE_PROJECT_MEMORY_DIR" --quiet 2>/dev/null || true
+fi
+
 # Load hot-tier preferences with auto-detected context
 prefs=$(python3 "$CLI" agent-context --auto-detect 2>/dev/null || echo "")
 stat_line=$(python3 "$CLI" stats --oneline 2>/dev/null || echo "")
