@@ -208,7 +208,7 @@ For each non-archived entry (in both ape.db and ape-confidential.db):
 
 **Tag matching:** Tags are stored comma-delimited. The query wraps `context_tags` in commas (`',' || context_tags || ','`) and searches for `,%tag,%` to prevent partial matches (e.g., tag `10.5` won't match `10.50` or `210.5`).
 
-**Tag validation:** Tags must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (alphanumeric start, then alphanumeric plus `.`, `_`, `-`). This prevents SQLite LIKE wildcards (`%`, `_`) from appearing in tag values. Validation is enforced at write time in `cli.py` and `storage.py`. Tags containing invalid characters are rejected with an error message.
+**Tag validation:** Tags must match `^[a-zA-Z0-9][a-zA-Z0-9.-]*$` (alphanumeric start, then alphanumeric plus `.` and `-`). Underscores (`_`) and percent signs (`%`) are excluded because they are LIKE wildcards in SQLite. Validation is enforced at write time in `cli.py` and `storage.py`. Tags containing invalid characters are rejected with an error message.
 
 **Cross-database signals:** Signal tags live in `ape.db` only (signals are behavioral, not confidential). When pruning `ape-confidential.db`, the pruner queries the signal table from `ape.db`. This is a read-only cross-database access -- no write contention.
 
@@ -494,7 +494,7 @@ ape: migrate confidential store from YAML to JSONL
 |---|---|
 | `scripts/session-end-hook.sh` | SessionEnd: ingest inbox, export both DBs, generate memory, push both repos |
 | `scripts/posttool-memory-intercept.py` | Copy memory writes to inbox (fast path, no DB writes) |
-| `scripts/memory_generator.py` | Generate `.md` files from knowledge entries for Claude Code, with timestamp comparison |
+| `scripts/memory_generator.py` | Generate `.md` files from knowledge entries for Claude Code, using atomic writes (temp-file + rename) |
 
 Migration logic (`migrate-confidential`, `import-memory`) is implemented as CLI subcommands in `cli.py`, not separate scripts.
 
@@ -531,4 +531,4 @@ memory:
 - **Temporal auto-archive is reversible.** Archived entries remain in SQLite. `knowledge restore <id>` un-archives them.
 - **Crash recovery.** If a session dies before the Stop hook fires, the inbox retains unprocessed files (intact, due to atomic writes). The next session's start hook ingests them. No data loss.
 - **Memory regeneration uses atomic writes.** Generated `.md` files are written via temp-file + rename, so Claude Code never reads a partial file. External edits to memory files are not auto-detected in v1 -- use the inbox or CLI to ingest changes.
-- **Tag validation at write time.** Tags matching `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` are accepted; others are rejected. This prevents LIKE wildcard injection in signal tag queries.
+- **Tag validation at write time.** Tags matching `^[a-zA-Z0-9][a-zA-Z0-9.-]*$` are accepted; others are rejected. Underscores and percent signs are excluded as LIKE wildcards.
