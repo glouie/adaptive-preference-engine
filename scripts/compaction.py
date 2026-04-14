@@ -43,13 +43,14 @@ class CompactionEngine:
     consolidated database entry with ref_path.
     """
 
-    def __init__(self, storage: PreferenceStorageManager = None, knowledge_storage=None):
+    def __init__(self, storage: PreferenceStorageManager = None, knowledge_storage=None, base_dir: str = None):
         """
         Initialize compaction engine.
 
         Args:
             storage: PreferenceStorageManager instance (optional if knowledge_storage provided)
             knowledge_storage: KnowledgeStorage instance (optional, defaults to storage.knowledge)
+            base_dir: Base directory path (required if knowledge_storage provided without storage)
         """
         self.storage = storage
 
@@ -62,7 +63,11 @@ class CompactionEngine:
             raise ValueError("Either storage or knowledge_storage must be provided")
 
         # Get base_dir for config
-        base_dir = storage.base_dir if storage else knowledge_storage.db_path.rsplit('/', 1)[0]
+        if storage:
+            base_dir = storage.base_dir
+        elif base_dir is None:
+            raise ValueError("base_dir must be provided when using knowledge_storage without storage")
+
         self.adaptive_config = AdaptiveConfig(base_dir)
 
         # Load APE config with budgets
@@ -281,7 +286,10 @@ class CompactionEngine:
 
         # Prepare ref file path
         sync_repo = Path(self.sync_repo_path)
-        partition_dir = sync_repo / "partitions" / partition.replace("/", "_")
+        # Encode partition name to avoid collisions (e.g., "projects/foo/bar" vs "projects_foo_bar")
+        # Use URL-safe encoding: replace "/" with "__" and "_" with "_u"
+        safe_partition = partition.replace("_", "_u").replace("/", "__")
+        partition_dir = sync_repo / "partitions" / safe_partition
         partition_dir.mkdir(parents=True, exist_ok=True)
 
         ref_file = partition_dir / "consolidated.md"

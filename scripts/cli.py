@@ -1388,10 +1388,15 @@ class AdaptivePreferenceCLI:
         # Trigger compaction check
         try:
             from scripts.compaction import CompactionEngine
-            if getattr(args, 'confidential', False):
-                engine = CompactionEngine(knowledge_storage=target_knowledge)
-            else:
+            if target_storage is self.storage:
+                # Using public storage
                 engine = CompactionEngine(storage=self.storage)
+            else:
+                # Using confidential storage
+                engine = CompactionEngine(
+                    knowledge_storage=target_knowledge,
+                    base_dir=str(target_storage.base_dir)
+                )
             compacted = engine.check_and_compact()
             for p in compacted:
                 print(f"  Compacted: {p}")
@@ -1400,7 +1405,7 @@ class AdaptivePreferenceCLI:
             logging.getLogger(__name__).warning(f"Compaction check failed: {exc}")
         finally:
             # Close confidential storage if used
-            if getattr(args, 'confidential', False):
+            if target_storage is not self.storage:
                 target_storage.close()
 
     def cmd_knowledge_search(self, args):
