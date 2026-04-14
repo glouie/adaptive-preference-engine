@@ -83,3 +83,60 @@ class TestArchiveExpired:
         ))
         archived_count = mgr.knowledge.archive_expired()
         assert archived_count == 0
+
+
+class TestSignalTagMatching:
+    def test_finds_entry_with_matching_signal(self, mgr):
+        entry = make_entry(
+            id="know_triggered",
+            expires_when_tag="10.5-shipped",
+            created_at="2026-01-01T00:00:00",
+        )
+        mgr.knowledge.save_entry(entry)
+        mgr.signals._conn.execute(
+            """INSERT INTO signals (id, type, task, context_tags,
+               emotional_indicators, preferences_used, associations_affected,
+               preferences_affected, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("sig_1", "feedback", "release", "deploy,10.5-shipped,ops",
+             "[]", "[]", "[]", "[]", "2026-04-01T00:00:00"),
+        )
+        mgr.signals._conn.commit()
+        triggered = mgr.knowledge.find_triggered_entries(mgr.signals._conn)
+        assert len(triggered) == 1
+        assert triggered[0].id == "know_triggered"
+
+    def test_ignores_signal_before_entry_created(self, mgr):
+        entry = make_entry(
+            id="know_not_triggered",
+            expires_when_tag="10.5-shipped",
+            created_at="2026-06-01T00:00:00",
+        )
+        mgr.knowledge.save_entry(entry)
+        mgr.signals._conn.execute(
+            """INSERT INTO signals (id, type, task, context_tags,
+               emotional_indicators, preferences_used, associations_affected,
+               preferences_affected, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("sig_old", "feedback", "release", "deploy,10.5-shipped",
+             "[]", "[]", "[]", "[]", "2026-01-01T00:00:00"),
+        )
+        mgr.signals._conn.commit()
+        triggered = mgr.knowledge.find_triggered_entries(mgr.signals._conn)
+        assert len(triggered) == 0
+
+    def test_no_partial_tag_match(self, mgr):
+        entry = make_entry(
+            id="know_partial",
+            expires_when_tag="10.5",
+            created_at="2026-01-01T00:00:00",
+        )
+        mgr.knowledge.save_entry(entry)
+        mgr.signals._conn.execute(
+            """INSERT INTO signals (id, type, task, context_tags,
+               emotional_indicators, preferences_used, associations_affected,
+               preferences_affected, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("sig_2", "feedback", "release", "deploy,10.50-beta",
+             "[]", "[]", "[]", "[]", "2026-04-01T00:00:00"),
+        )
+        mgr.signals._conn.commit()
+        triggered = mgr.knowledge.find_triggered_entries(mgr.signals._conn)
+        assert len(triggered) == 0

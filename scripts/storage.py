@@ -678,6 +678,33 @@ class KnowledgeStorage(SQLiteDB):
             )
             return cursor.rowcount
 
+    def find_triggered_entries(self, signals_conn) -> List[KnowledgeEntry]:
+        """Find entries whose expires_when_tag has a matching signal after created_at.
+
+        Args:
+            signals_conn: Connection to the database containing the signals table.
+                          For confidential DB entries, this is the public DB connection.
+        """
+        entries = self._conn.execute(
+            """SELECT * FROM knowledge
+               WHERE expires_when_tag IS NOT NULL
+                 AND archived = 0"""
+        ).fetchall()
+
+        triggered = []
+        for row in entries:
+            entry = self._row_to_entry(row)
+            tag = entry.expires_when_tag
+            count = signals_conn.execute(
+                """SELECT COUNT(*) FROM signals
+                   WHERE ',' || context_tags || ',' LIKE '%,' || ? || ',%'
+                     AND timestamp > ?""",
+                (tag, entry.created_at),
+            ).fetchone()[0]
+            if count > 0:
+                triggered.append(entry)
+        return triggered
+
     @staticmethod
     def _row_to_entry(row: sqlite3.Row) -> KnowledgeEntry:
         d = dict(row)
