@@ -92,6 +92,23 @@ _DEFAULTS = {
         "tools.cli",
         "tools.adaptive_cli",
     ],
+    "confidential": {
+        "db_path": "~/.adaptive-cli/ape-confidential.db",
+        "repo_path": "~/gitlab/gskills",
+        "store_dir": ".ape-confidential",
+        "patterns": [
+            "~/notes-vault",
+            "~/learning/",
+            "/Users/",
+            "cd.splunkdev.com",
+            "@cisco.com",
+        ],
+        "auto_classify": True,
+    },
+    "memory": {
+        "inbox_path": "~/.adaptive-cli/memory-inbox",
+        "intercept_writes": True,
+    },
 }
 
 
