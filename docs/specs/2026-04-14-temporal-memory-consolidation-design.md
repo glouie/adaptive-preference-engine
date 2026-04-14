@@ -279,7 +279,7 @@ Added to `hooks.json`:
 
 During session-start and session-end hooks, APE generates memory files from its knowledge store:
 
-1. Query non-archived knowledge entries relevant to the current project context.
+1. Query non-archived knowledge entries relevant to the current project context. Relevance is determined by matching entry `partition` and `tags` against the session's `context_tags` (derived from the working directory in `session-start-hook.sh`). Same matching logic as the existing knowledge compaction context injection.
 2. For each entry, generate a `.md` file with frontmatter:
 
 ```markdown
@@ -408,7 +408,7 @@ ape: migrate confidential store from YAML to JSONL
 | `scripts/cli.py` | New flags: `--expires-at`, `--expires-when`, `--expires-when-tag`, `--confidential`, `knowledge import-memory` |
 | `scripts/session-start-hook.sh` | Add expires_at check, memory .md generation |
 | `scripts/compaction.py` | Route ref files to correct repo based on confidential flag |
-| `hooks/hooks.json` | Add Stop hook, update PostToolUse matcher |
+| `hooks/hooks.json` | Add Stop hook, add second PostToolUse entry for memory intercept (runs alongside existing signal detector, both are independent) |
 
 #### Files Created
 
