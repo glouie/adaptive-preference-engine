@@ -1339,6 +1339,7 @@ class AdaptivePreferenceCLI:
     def cmd_knowledge_add(self, args):
         import socket
         from adaptive_preference_engine.knowledge import KnowledgeEntry
+        from scripts.confidential_classifier import is_confidential
 
         # Validate expires_when_tag if provided
         if args.expires_when_tag:
@@ -1351,10 +1352,17 @@ class AdaptivePreferenceCLI:
 
         # Determine target storage
         if getattr(args, 'confidential', False):
+            # Explicit flag — use confidential DB
+            from scripts.storage import ConfidentialStorageManager
+            target_storage = ConfidentialStorageManager()
+            target_knowledge = target_storage.knowledge
+        elif is_confidential(args.content) or is_confidential(args.title):
+            # Auto-classified — use confidential DB
             from scripts.storage import ConfidentialStorageManager
             target_storage = ConfidentialStorageManager()
             target_knowledge = target_storage.knowledge
         else:
+            # Public DB
             target_storage = self.storage
             target_knowledge = self.storage.knowledge
 
