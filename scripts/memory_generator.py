@@ -68,7 +68,10 @@ def generate_memory_files(
             os.close(tmp_fd)
             os.rename(tmp_path, str(target))
         except Exception:
-            os.close(tmp_fd) if not os.get_inheritable(tmp_fd) else None
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             raise
