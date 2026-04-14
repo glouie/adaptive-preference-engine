@@ -1554,21 +1554,57 @@ class AdaptivePreferenceCLI:
 
     def cmd_knowledge_expire(self, args):
         """Archive expired entries from both public and confidential stores."""
-        count = self.storage.knowledge.archive_expired()
+        calendar_count = 0
+        signal_count = 0
+        conf_calendar_count = 0
+        conf_signal_count = 0
+
+        # Calendar-based expiry (always run)
+        calendar_count = self.storage.knowledge.archive_expired()
+
+        # Signal-triggered expiry (only if --signal flag is set)
+        if getattr(args, "signal", False):
+            # Get public DB connection for signals table
+            signals_conn = self.storage._conn
+
+            # Find and archive triggered entries in public DB
+            triggered = self.storage.knowledge.find_triggered_entries(signals_conn)
+            for entry in triggered:
+                self.storage.knowledge.archive_entry(entry.id)
+            signal_count = len(triggered)
+
         # Also check confidential DB
-        conf_count = 0
         try:
             from scripts.storage import ConfidentialStorageManager
             conf_mgr = ConfidentialStorageManager()
-            conf_count = conf_mgr.knowledge.archive_expired()
+            conf_calendar_count = conf_mgr.knowledge.archive_expired()
+
+            # Signal-triggered expiry for confidential DB (if --signal flag is set)
+            if getattr(args, "signal", False):
+                signals_conn = self.storage._conn  # Use public DB for signals
+                conf_triggered = conf_mgr.knowledge.find_triggered_entries(signals_conn)
+                for entry in conf_triggered:
+                    conf_mgr.knowledge.archive_entry(entry.id)
+                conf_signal_count = len(conf_triggered)
+
             conf_mgr.close()
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"Confidential expiry failed: {e}")
+
         if not getattr(args, "quiet", False):
-            total = count + conf_count
+            total_calendar = calendar_count + conf_calendar_count
+            total_signal = signal_count + conf_signal_count
+            total = total_calendar + total_signal
+
             if total > 0:
-                print(f"Archived {total} expired entries ({count} public, {conf_count} confidential)")
+                parts = []
+                if total_calendar > 0:
+                    parts.append(f"{total_calendar} calendar-expired")
+                if total_signal > 0:
+                    parts.append(f"{total_signal} signal-triggered")
+                parts.append(f"({calendar_count + signal_count} public, {conf_calendar_count + conf_signal_count} confidential)")
+                print(f"Archived {total} entries: {', '.join(parts)}")
             else:
                 print("No expired entries found")
 
@@ -2179,6 +2215,7 @@ Examples:
 
     know_expire = knowledge_sub.add_parser("expire", help="Archive expired entries")
     know_expire.add_argument("--quiet", action="store_true")
+    know_expire.add_argument("--signal", action="store_true", help="Also check signal-triggered expiry")
 
     know_ingest = knowledge_sub.add_parser("ingest-inbox", help="Ingest pending memory inbox files")
     know_ingest.add_argument("--quiet", action="store_true")
