@@ -13,6 +13,7 @@ The export format is plain JSONL (one JSON object per line), identical to
 the old storage format, so the files are human-readable and git-diffable.
 """
 
+import fcntl
 import json
 import os
 import shutil
@@ -23,10 +24,44 @@ from typing import Dict
 
 from adaptive_preference_engine.knowledge import KnowledgeEntry
 from scripts.models import Association, ContextStack, Preference, Signal
-from scripts.storage import PreferenceStorageManager
+from scripts.storage import PreferenceStorageManager, ConfidentialStorageManager
 
 # ~/.claude/ files synced by push/pull (filenames only, no subdirs)
 _CLAUDE_SYNC_SCRIPTS = ["statusline-ape.sh", "settings.json"]
+
+
+class RepoLock:
+    """Non-blocking flock for serializing git operations on a repo."""
+
+    def __init__(self, repo_name: str, lock_dir: str = "~/.adaptive-cli"):
+        lock_dir = Path(lock_dir).expanduser()
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        self.lock_path = lock_dir / f"{repo_name}.lock"
+        self._fd = None
+
+    def acquire(self) -> bool:
+        self._fd = open(self.lock_path, "w")
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except (IOError, OSError):
+            self._fd.close()
+            self._fd = None
+            return False
+
+    def release(self) -> None:
+        if self._fd:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            self._fd.close()
+            self._fd = None
+
+    def __enter__(self):
+        if not self.acquire():
+            raise RuntimeError(f"Could not acquire lock: {self.lock_path}")
+        return self
+
+    def __exit__(self, *args):
+        self.release()
 
 
 class PreferenceSync:
@@ -148,6 +183,39 @@ class PreferenceSync:
             except Exception as exc:
                 print(f"  WARNING: Post-import compaction failed: {exc}")
 
+        return counts
+
+
+class ConfidentialSync:
+    """Export/import for the confidential knowledge database (knowledge only)."""
+
+    @staticmethod
+    def export(cmgr: "ConfidentialStorageManager", dest_dir: Path) -> Dict:
+        dest_dir = Path(dest_dir)
+        entries = cmgr.knowledge.get_all_entries(include_archived=True)
+        records = []
+        for e in entries:
+            d = e.to_dict()
+            d["tags"] = json.dumps(d["tags"])
+            records.append(d)
+        _write_jsonl(dest_dir / "knowledge.jsonl", records)
+        return {"knowledge": len(records)}
+
+    @staticmethod
+    def import_from(cmgr: "ConfidentialStorageManager", src_dir: Path) -> Dict:
+        src_dir = Path(src_dir)
+        counts = {}
+        knowledge_path = src_dir / "knowledge.jsonl"
+        if knowledge_path.exists():
+            records = _read_jsonl(knowledge_path)
+            imported = 0
+            for rec in records:
+                if "tags" in rec and isinstance(rec["tags"], str):
+                    rec["tags"] = json.loads(rec["tags"])
+                entry = KnowledgeEntry.from_dict(rec)
+                cmgr.knowledge.save_entry(entry)
+                imported += 1
+            counts["knowledge"] = imported
         return counts
 
 
