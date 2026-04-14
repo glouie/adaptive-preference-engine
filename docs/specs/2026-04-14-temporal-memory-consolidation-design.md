@@ -1,7 +1,7 @@
 # Temporal Support, Memory Consolidation & Confidential Store Design
 
 **Date:** 2026-04-14
-**Status:** Draft (rev 2 -- addressing adversarial review findings)
+**Status:** Draft (rev 3 -- addressing Codex adversarial review findings)
 **Supersedes:** None (extends existing knowledge and sync systems)
 
 ## Problem
@@ -132,6 +132,8 @@ ape-confidential.db --> ~/gitlab/gskills/.ape-confidential/knowledge.jsonl
 
 Other tables (preferences, associations, contexts, signals) live only in `ape.db` and sync to the public repo. They contain behavioral patterns, not factual data.
 
+**Split-brain detection:** Because the two repos push independently, a crash between the first and second push leaves one repo ahead of the other. On session-start, after pulling both repos, the sync runner compares the last-push timestamp stored in each database's `sync_meta` table. If the timestamps differ by more than 60 seconds, a warning is logged: `"ape: split-brain detected -- public last pushed <T1>, confidential last pushed <T2>"`. No automatic repair is attempted (the data is not corrupted, just out of sync). The next session-end push brings both repos current. The `sync_meta` table is a new single-row table: `CREATE TABLE IF NOT EXISTS sync_meta (last_push_at TEXT, last_pull_at TEXT)`.
+
 #### Sync Pull (Modified)
 
 Pull imports into each database from its paired repo:
@@ -141,6 +143,8 @@ Pull imports into each database from its paired repo:
 3. Other tables imported from public repo into `ape.db` only (unchanged).
 
 **Conflict resolution:** Both repos use `git pull --rebase`. If rebase fails (diverged history), fall back to `git stash && git pull && git stash pop`. If that also fails, log a warning and skip the pull -- local state is authoritative, and the next push will reconcile. JSONL import uses upsert (match on `id`), so duplicate entries from a messy merge are idempotent.
+
+**Repo operation serialization:** All git operations on a given repo are serialized via a lockfile (`~/.adaptive-cli/<repo-name>.lock`) using `fcntl.flock()`. This prevents concurrent Claude Code sessions (multiple terminals) from interleaving pull/stash/push operations on the same repo. Lock acquisition uses `LOCK_EX | LOCK_NB` (non-blocking) -- if the lock is held, the operation is skipped with a log warning rather than blocking the session.
 
 #### Confidential Store Migration
 
@@ -204,11 +208,13 @@ For each non-archived entry (in both ape.db and ape-confidential.db):
 
 **Tag matching:** Tags are stored comma-delimited. The query wraps `context_tags` in commas (`',' || context_tags || ','`) and searches for `,%tag,%` to prevent partial matches (e.g., tag `10.5` won't match `10.50` or `210.5`).
 
+**Tag validation:** Tags must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (alphanumeric start, then alphanumeric plus `.`, `_`, `-`). This prevents SQLite LIKE wildcards (`%`, `_`) from appearing in tag values. Validation is enforced at write time in `cli.py` and `storage.py`. Tags containing invalid characters are rejected with an error message.
+
 **Cross-database signals:** Signal tags live in `ape.db` only (signals are behavioral, not confidential). When pruning `ape-confidential.db`, the pruner queries the signal table from `ape.db`. This is a read-only cross-database access -- no write contention.
 
 Non-interactive mode (`prune --auto`): archives `expires_at` entries, skips review prompts for tagged entries. Tagged entries wait for an interactive session.
 
-**Performance budget:** Session-start expiry check targets <200ms added latency. This is O(n) over knowledge entries with `expires_at` set -- acceptable for hundreds of entries. If entry count exceeds 1000, add an index: `CREATE INDEX IF NOT EXISTS idx_knowledge_expires ON knowledge(expires_at) WHERE expires_at IS NOT NULL`.
+**Performance budget:** Session-start expiry check targets <200ms added latency. This is O(n) over knowledge entries with `expires_at` set -- acceptable for hundreds of entries. If entry count exceeds 1000, add an index: `CREATE INDEX IF NOT EXISTS idx_knowledge_expires ON knowledge(expires_at) WHERE expires_at IS NOT NULL`. Implementation must include a timing acceptance test: seed both databases with 500 entries each (100 with `expires_at`), measure archive pass, assert <200ms on a cold cache.
 
 #### CLI Surface
 
@@ -311,8 +317,9 @@ Added to `hooks.json` (runs alongside existing signal detector -- both are indep
 1. Read tool result from stdin (JSON with `file_path`).
 2. If `file_path` does not contain `/memory/`, exit 0 (not a memory write).
 3. If `file_path` ends with `MEMORY.md`, exit 0 (index file, skip).
-4. Copy the file to `~/.adaptive-cli/memory-inbox/<basename>` (preserving content).
-5. Exit 0. No database writes, no moves, no classification. Fast path (<50ms).
+4. Derive a unique inbox filename: `<project-hash>_<basename>` where `<project-hash>` is extracted from the file path (`~/.claude/projects/<hash>/memory/<basename>`). This prevents collisions when multiple projects have memory files with the same name (e.g., `feedback_testing.md`).
+5. Write to inbox using atomic temp-file + rename: write to `~/.adaptive-cli/memory-inbox/.<unique-name>.tmp`, then `os.rename()` to final path. This prevents partial files from a crash mid-copy.
+6. Exit 0. No database writes, no moves, no classification. Fast path (<50ms).
 
 The actual ingestion logic (parsing frontmatter, classifying confidential, writing to DB) runs during session boundary hooks:
 
@@ -323,7 +330,7 @@ The actual ingestion logic (parsing frontmatter, classifying confidential, writi
    - `type: project` --> `category: context`, `partition: projects/<project>`
    - `type: reference` --> `category: reference`
 3. Scan content against `confidential.patterns` to route to correct DB.
-4. Run upsert (match on title + content hash to avoid duplicates).
+4. Run upsert (match on SHA-256 of `title + content + type + partition` to avoid duplicates and detect metadata changes).
 5. Delete the inbox file after successful ingestion.
 
 #### Memory .md Generation
@@ -331,10 +338,8 @@ The actual ingestion logic (parsing frontmatter, classifying confidential, writi
 During session-start and session-end hooks, APE generates memory files from its knowledge store:
 
 1. Query non-archived knowledge entries from both databases relevant to the current project context. Relevance is determined by matching entry `partition` and `tags` against the session's `context_tags` (derived from the working directory in `session-start-hook.sh`). Same matching logic as the existing knowledge compaction context injection.
-2. For each entry, check if a corresponding `.md` file already exists and compare timestamps:
-   - If the file's mtime is newer than the entry's `updated_at`, the file was modified externally -- ingest changes back into APE before overwriting.
-   - If the entry is newer or the file doesn't exist, generate/overwrite.
-3. For each entry, generate a `.md` file with frontmatter:
+2. **External edit detection (v1: disabled, documented for v2).** Comparing file mtime to entry `updated_at` introduces a TOCTOU race: an editor could modify a file between the check and the overwrite. Additionally, coarse filesystem timestamps (1-second resolution on HFS+) make same-second edits undetectable. For v1, APE always overwrites memory files from the database -- the inbox is the only ingest path. External edits outside Claude Code must be routed through `adaptive-cli knowledge add` or placed in the inbox manually. V2 can add inotify/fsevents watching for a race-free solution.
+3. For each entry, generate a `.md` file with frontmatter using atomic writes (temp-file + rename to prevent partial reads by Claude Code):
 
 ```markdown
 ---
@@ -359,7 +364,7 @@ adaptive-cli knowledge import-memory --scan
 
 1. Scans all `~/.claude/projects/*/memory/*.md` files (excluding `MEMORY.md`).
 2. Parses frontmatter and content.
-3. **Deduplication:** For each entry, compute a content hash (SHA-256 of title + content). Skip if an entry with the same hash already exists in either database. This makes the import idempotent -- safe to run multiple times.
+3. **Deduplication:** For each entry, compute a content hash (SHA-256 of `title + content + type + partition`). Skip if an entry with the same hash already exists in either database. Including type and partition in the hash ensures that metadata-only changes (e.g., reclassifying from `user` to `project`, or moving to a different partition) are detected as new entries. This makes the import idempotent -- safe to run multiple times.
 4. Creates knowledge entries with appropriate partition, category, and confidential classification (routed to the correct DB via pattern matching).
 5. After import, APE takes ownership of the memory directories.
 
@@ -518,9 +523,12 @@ memory:
 - **Schema migration is additive.** New columns are nullable with defaults. Existing code that doesn't read the new fields continues to work.
 - **Dual-database is backward-compatible.** The public `ape.db` retains its existing path and schema. Code that only reads `ape.db` is unaffected. The confidential database is new and additive.
 - **Confidential store migration preserves the YAML.** The YAML file is deleted only after successful JSONL write and SQLite import. Git history preserves the YAML.
-- **Memory import is non-destructive and idempotent.** Existing `.md` files are read, not deleted. Deduplication via content hash prevents duplicates on re-run. APE takes ownership by generating files on top of them. If APE breaks, the original files still exist in git history or the inbox.
-- **Memory intercept is copy-not-move.** The PostToolUse hook copies to inbox rather than moving. The agent's view of the filesystem is never disrupted. Original files remain readable until APE regenerates them.
-- **Push failure is non-blocking.** Local commits succeed regardless of push status. Public and confidential pushes are independent. No data loss on network failure.
+- **Memory import is non-destructive and idempotent.** Existing `.md` files are read, not deleted. Deduplication via content hash (title + content + type + partition) prevents duplicates on re-run and detects metadata-only changes. APE takes ownership by generating files on top of them. If APE breaks, the original files still exist in git history or the inbox.
+- **Memory intercept is copy-not-move with atomic writes.** The PostToolUse hook copies to inbox via temp-file + rename. The agent's view of the filesystem is never disrupted. Inbox filenames include the project hash to prevent cross-project basename collisions. Partial files from a crash mid-copy are never visible to the ingestion logic.
+- **Push failure is non-blocking.** Local commits succeed regardless of push status. Public and confidential pushes are independent. No data loss on network failure. Split-brain (one repo ahead) is detected on next session-start and resolved by the next full push.
 - **Pull failure is non-blocking.** Session-start pull uses rebase with stash fallback. If both fail, local state is authoritative. The next push reconciles.
+- **Repo operations are serialized.** `fcntl.flock()` lockfiles prevent concurrent sessions from interleaving git operations. Non-blocking acquisition means a locked-out session skips rather than deadlocks.
 - **Temporal auto-archive is reversible.** Archived entries remain in SQLite. `knowledge restore <id>` un-archives them.
-- **Crash recovery.** If a session dies before the Stop hook fires, the inbox retains unprocessed files. The next session's start hook ingests them. No data loss.
+- **Crash recovery.** If a session dies before the Stop hook fires, the inbox retains unprocessed files (intact, due to atomic writes). The next session's start hook ingests them. No data loss.
+- **Memory regeneration uses atomic writes.** Generated `.md` files are written via temp-file + rename, so Claude Code never reads a partial file. External edits to memory files are not auto-detected in v1 -- use the inbox or CLI to ingest changes.
+- **Tag validation at write time.** Tags matching `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` are accepted; others are rejected. This prevents LIKE wildcard injection in signal tag queries.
