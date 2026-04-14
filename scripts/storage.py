@@ -858,6 +858,12 @@ class PreferenceStorageManager:
                     self._conn.commit()
                 except sqlite3.OperationalError:
                     pass  # Column already exists (fresh DB)
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS sync_meta (
+                    last_push_at TEXT,
+                    last_pull_at TEXT
+                );
+            """)
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
@@ -965,6 +971,26 @@ class PreferenceStorageManager:
                 assert table in _RESET_TABLES  # belt-and-suspenders: only allowlisted names
                 self._conn.execute(f"DELETE FROM {table}")
 
+    def update_sync_meta(self, push_at=None, pull_at=None):
+        row = self._conn.execute("SELECT COUNT(*) FROM sync_meta").fetchone()[0]
+        if row == 0:
+            self._conn.execute(
+                "INSERT INTO sync_meta (last_push_at, last_pull_at) VALUES (?, ?)",
+                (push_at, pull_at),
+            )
+        else:
+            if push_at:
+                self._conn.execute("UPDATE sync_meta SET last_push_at = ?", (push_at,))
+            if pull_at:
+                self._conn.execute("UPDATE sync_meta SET last_pull_at = ?", (pull_at,))
+        self._conn.commit()
+
+    def get_sync_meta(self):
+        row = self._conn.execute("SELECT * FROM sync_meta").fetchone()
+        if row:
+            return {"last_push_at": row["last_push_at"], "last_pull_at": row["last_pull_at"]}
+        return {"last_push_at": None, "last_pull_at": None}
+
     def close(self) -> None:
         """Close the SQLite connection and checkpoint the WAL file. Idempotent."""
         if self._closed:
@@ -978,3 +1004,82 @@ class PreferenceStorageManager:
 
     def __exit__(self, _exc_type: object, _exc_val: object, _exc_tb: object) -> None:
         self.close()
+
+
+class ConfidentialStorageManager:
+    """Lightweight storage manager for the confidential database.
+
+    Only exposes a KnowledgeStorage — confidential DB has no preferences,
+    associations, contexts, or signals (those live in the public DB).
+    """
+
+    def __init__(self, base_dir=None):
+        if base_dir is None:
+            base_dir = os.path.expanduser("~/.adaptive-cli")
+        self.base_dir = Path(base_dir)
+        db_path = self.base_dir / "ape-confidential.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        _raw_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        _raw_conn.row_factory = sqlite3.Row
+        self._conn = _LockedConnection(_raw_conn, self._lock)
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS knowledge (
+                id              TEXT PRIMARY KEY,
+                partition       TEXT NOT NULL,
+                category        TEXT NOT NULL,
+                title           TEXT NOT NULL,
+                tags            TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                confidence      REAL DEFAULT 1.0,
+                source          TEXT DEFAULT 'explicit',
+                machine_origin  TEXT,
+                decay_exempt    INTEGER DEFAULT 0,
+                access_count    INTEGER DEFAULT 0,
+                token_estimate  INTEGER DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                last_used       TEXT NOT NULL,
+                archived        INTEGER DEFAULT 0,
+                ref_path        TEXT,
+                expires_at      TEXT,
+                expires_when    TEXT,
+                expires_when_tag TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
+            CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
+            CREATE INDEX IF NOT EXISTS idx_know_archived  ON knowledge(archived);
+            CREATE TABLE IF NOT EXISTS sync_meta (
+                last_push_at TEXT,
+                last_pull_at TEXT
+            );
+        """)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.commit()
+        self._closed = False
+        self.db_path = db_path
+        self.knowledge = KnowledgeStorage(self._conn)
+
+    def close(self):
+        if not self._closed:
+            self._conn.close()
+            self._closed = True
+
+    def update_sync_meta(self, push_at=None, pull_at=None):
+        row = self._conn.execute("SELECT COUNT(*) FROM sync_meta").fetchone()[0]
+        if row == 0:
+            self._conn.execute(
+                "INSERT INTO sync_meta (last_push_at, last_pull_at) VALUES (?, ?)",
+                (push_at, pull_at),
+            )
+        else:
+            if push_at:
+                self._conn.execute("UPDATE sync_meta SET last_push_at = ?", (push_at,))
+            if pull_at:
+                self._conn.execute("UPDATE sync_meta SET last_pull_at = ?", (pull_at,))
+        self._conn.commit()
+
+    def get_sync_meta(self):
+        row = self._conn.execute("SELECT * FROM sync_meta").fetchone()
+        if row:
+            return {"last_push_at": row["last_push_at"], "last_pull_at": row["last_pull_at"]}
+        return {"last_push_at": None, "last_pull_at": None}
