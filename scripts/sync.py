@@ -234,46 +234,47 @@ class SyncRunner:
                 "Run: adaptive-cli sync configure --repo-path <path>"
             )
 
-        counts = PreferenceSync.export(self.mgr, self.repo)
+        with RepoLock(self.repo.name):
+            counts = PreferenceSync.export(self.mgr, self.repo)
 
-        # Export agent definitions from ~/.adaptive-cli/agents/ if any exist
-        local_agents = Path(os.path.expanduser("~/.adaptive-cli/agents"))
-        if local_agents.exists():
-            repo_agents = self.repo / "agents"
-            repo_agents.mkdir(exist_ok=True)
-            for f in local_agents.glob("*.md"):
-                shutil.copy2(f, repo_agents / f.name)
+            # Export agent definitions from ~/.adaptive-cli/agents/ if any exist
+            local_agents = Path(os.path.expanduser("~/.adaptive-cli/agents"))
+            if local_agents.exists():
+                repo_agents = self.repo / "agents"
+                repo_agents.mkdir(exist_ok=True)
+                for f in local_agents.glob("*.md"):
+                    shutil.copy2(f, repo_agents / f.name)
 
-        # Export ~/.claude/ scripts (statusline, etc.)
-        claude_dir = Path.home() / ".claude"
-        repo_scripts = self.repo / "claude_scripts"
-        for src in _CLAUDE_SYNC_SCRIPTS:
-            f = claude_dir / src
-            if f.exists():
-                repo_scripts.mkdir(exist_ok=True)
-                shutil.copy2(f, repo_scripts / f.name)
+            # Export ~/.claude/ scripts (statusline, etc.)
+            claude_dir = Path.home() / ".claude"
+            repo_scripts = self.repo / "claude_scripts"
+            for src in _CLAUDE_SYNC_SCRIPTS:
+                f = claude_dir / src
+                if f.exists():
+                    repo_scripts.mkdir(exist_ok=True)
+                    shutil.copy2(f, repo_scripts / f.name)
 
-        status = _git(["status", "--porcelain"], cwd=self.repo)
-        if not status.strip():
-            return {"status": "up-to-date", "counts": counts}
+            status = _git(["status", "--porcelain"], cwd=self.repo)
+            if not status.strip():
+                return {"status": "up-to-date", "counts": counts}
 
-        git_add = ["all_preferences.jsonl", "associations.jsonl",
-                   "contexts.jsonl", "signals.jsonl", "knowledge.jsonl"]
-        if (self.repo / "config.yaml").exists():
-            git_add.append("config.yaml")
-        if (self.repo / "agents").exists():
-            git_add.append("agents/")
-        if (self.repo / "claude_scripts").exists():
-            git_add.append("claude_scripts/")
-        _git(["add"] + git_add, cwd=self.repo)
+            git_add = ["all_preferences.jsonl", "associations.jsonl",
+                       "contexts.jsonl", "signals.jsonl", "knowledge.jsonl"]
+            if (self.repo / "config.yaml").exists():
+                git_add.append("config.yaml")
+            if (self.repo / "agents").exists():
+                git_add.append("agents/")
+            if (self.repo / "claude_scripts").exists():
+                git_add.append("claude_scripts/")
+            _git(["add"] + git_add, cwd=self.repo)
 
-        msg = f"sync: export preferences {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        _git(["commit", "-m", msg], cwd=self.repo)
-        try:
-            _git(["push"], cwd=self.repo)
-            return {"status": "pushed", "counts": counts}
-        except RuntimeError as e:
-            return {"status": "committed", "counts": counts, "git_push_error": str(e)}
+            msg = f"sync: export preferences {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            _git(["commit", "-m", msg], cwd=self.repo)
+            try:
+                _git(["push"], cwd=self.repo)
+                return {"status": "pushed", "counts": counts}
+            except RuntimeError as e:
+                return {"status": "committed", "counts": counts, "git_push_error": str(e)}
 
     def pull(self) -> Dict:
         """git pull, then import JSONL → SQLite. Returns result dict."""
@@ -283,69 +284,70 @@ class SyncRunner:
                 "Run: adaptive-cli sync configure --repo-path <path>"
             )
 
-        git_pull_error = None
-        try:
-            _git(["pull"], cwd=self.repo)
-        except RuntimeError as e:
-            git_pull_error = str(e)
-            # Abort if the repo is in a conflicted state — importing from
-            # conflict-marked JSONL would silently corrupt data.
-            conflict_status = _git_safe(["status", "--porcelain"], cwd=self.repo)
-            if conflict_status and any(
-                line[:2] in ("AA", "UU", "DD", "AU", "UA", "DU", "UD")
-                for line in conflict_status.splitlines()
-            ):
-                return {
-                    "status": "conflict",
-                    "git_pull_error": git_pull_error,
-                    "counts": {},
-                }
-        counts = PreferenceSync.import_from(self.mgr, self.repo)
+        with RepoLock(self.repo.name):
+            git_pull_error = None
+            try:
+                _git(["pull"], cwd=self.repo)
+            except RuntimeError as e:
+                git_pull_error = str(e)
+                # Abort if the repo is in a conflicted state — importing from
+                # conflict-marked JSONL would silently corrupt data.
+                conflict_status = _git_safe(["status", "--porcelain"], cwd=self.repo)
+                if conflict_status and any(
+                    line[:2] in ("AA", "UU", "DD", "AU", "UA", "DU", "UD")
+                    for line in conflict_status.splitlines()
+                ):
+                    return {
+                        "status": "conflict",
+                        "git_pull_error": git_pull_error,
+                        "counts": {},
+                    }
+            counts = PreferenceSync.import_from(self.mgr, self.repo)
 
-        # Restore agent definitions to ~/.adaptive-cli/agents/ and ~/.claude/agents/
-        repo_agents = self.repo / "agents"
-        if repo_agents.exists():
-            local_agents = Path(os.path.expanduser("~/.adaptive-cli/agents"))
-            claude_agents = Path.home() / ".claude" / "agents"
-            local_agents.mkdir(parents=True, exist_ok=True)
-            claude_agents.mkdir(parents=True, exist_ok=True)
-            installed = 0
-            for f in repo_agents.glob("*.md"):
-                # Reject symlinks and names with path separators to prevent traversal
-                if f.is_symlink():
-                    print(f"  WARNING: Skipping symlink in agents/: {f.name}")
-                    continue
-                real = f.resolve()
-                if not str(real).startswith(str(repo_agents.resolve())):
-                    print(f"  WARNING: Skipping out-of-tree agent file: {f.name}")
-                    continue
-                safe_name = f.name
-                if "/" in safe_name or "\\" in safe_name or ".." in safe_name:
-                    print(f"  WARNING: Skipping unsafe agent filename: {safe_name}")
-                    continue
-                shutil.copy2(f, local_agents / safe_name)
-                shutil.copy2(f, claude_agents / safe_name)
-                installed += 1
-            counts["agents"] = installed
+            # Restore agent definitions to ~/.adaptive-cli/agents/ and ~/.claude/agents/
+            repo_agents = self.repo / "agents"
+            if repo_agents.exists():
+                local_agents = Path(os.path.expanduser("~/.adaptive-cli/agents"))
+                claude_agents = Path.home() / ".claude" / "agents"
+                local_agents.mkdir(parents=True, exist_ok=True)
+                claude_agents.mkdir(parents=True, exist_ok=True)
+                installed = 0
+                for f in repo_agents.glob("*.md"):
+                    # Reject symlinks and names with path separators to prevent traversal
+                    if f.is_symlink():
+                        print(f"  WARNING: Skipping symlink in agents/: {f.name}")
+                        continue
+                    real = f.resolve()
+                    if not str(real).startswith(str(repo_agents.resolve())):
+                        print(f"  WARNING: Skipping out-of-tree agent file: {f.name}")
+                        continue
+                    safe_name = f.name
+                    if "/" in safe_name or "\\" in safe_name or ".." in safe_name:
+                        print(f"  WARNING: Skipping unsafe agent filename: {safe_name}")
+                        continue
+                    shutil.copy2(f, local_agents / safe_name)
+                    shutil.copy2(f, claude_agents / safe_name)
+                    installed += 1
+                counts["agents"] = installed
 
-        # Restore ~/.claude/ scripts
-        repo_scripts = self.repo / "claude_scripts"
-        if repo_scripts.exists():
-            claude_dir = Path.home() / ".claude"
-            claude_dir.mkdir(parents=True, exist_ok=True)
-            restored = 0
-            for name in _CLAUDE_SYNC_SCRIPTS:
-                src = repo_scripts / name
-                if src.exists() and not src.is_symlink():
-                    shutil.copy2(src, claude_dir / name)
-                    restored += 1
-            if restored:
-                counts["claude_scripts"] = restored
+            # Restore ~/.claude/ scripts
+            repo_scripts = self.repo / "claude_scripts"
+            if repo_scripts.exists():
+                claude_dir = Path.home() / ".claude"
+                claude_dir.mkdir(parents=True, exist_ok=True)
+                restored = 0
+                for name in _CLAUDE_SYNC_SCRIPTS:
+                    src = repo_scripts / name
+                    if src.exists() and not src.is_symlink():
+                        shutil.copy2(src, claude_dir / name)
+                        restored += 1
+                if restored:
+                    counts["claude_scripts"] = restored
 
-        result: Dict = {"status": "pulled", "counts": counts}
-        if git_pull_error:
-            result["git_pull_error"] = git_pull_error
-        return result
+            result: Dict = {"status": "pulled", "counts": counts}
+            if git_pull_error:
+                result["git_pull_error"] = git_pull_error
+            return result
 
     def status(self) -> str:
         """Return git status output from the sync repo."""
