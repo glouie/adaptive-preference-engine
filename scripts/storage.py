@@ -556,11 +556,13 @@ class KnowledgeStorage(SQLiteDB):
                 INSERT INTO knowledge
                     (id, partition, category, title, tags, content, confidence,
                      source, machine_origin, decay_exempt, access_count,
-                     token_estimate, created_at, last_used, archived, ref_path)
+                     token_estimate, created_at, last_used, archived, ref_path,
+                     expires_at, expires_when, expires_when_tag)
                 VALUES
                     (:id, :partition, :category, :title, :tags, :content, :confidence,
                      :source, :machine_origin, :decay_exempt, :access_count,
-                     :token_estimate, :created_at, :last_used, :archived, :ref_path)
+                     :token_estimate, :created_at, :last_used, :archived, :ref_path,
+                     :expires_at, :expires_when, :expires_when_tag)
                 ON CONFLICT(id) DO UPDATE SET
                     partition       = excluded.partition,
                     category        = excluded.category,
@@ -575,7 +577,10 @@ class KnowledgeStorage(SQLiteDB):
                     token_estimate  = excluded.token_estimate,
                     last_used       = excluded.last_used,
                     archived        = excluded.archived,
-                    ref_path        = excluded.ref_path
+                    ref_path        = excluded.ref_path,
+                    expires_at      = excluded.expires_at,
+                    expires_when    = excluded.expires_when,
+                    expires_when_tag = excluded.expires_when_tag
                 """,
                 {
                     **d,
@@ -674,7 +679,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    _CURRENT_VERSION = 5
+    _CURRENT_VERSION = 6
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
@@ -748,7 +753,10 @@ class PreferenceStorageManager:
                     created_at      TEXT NOT NULL,
                     last_used       TEXT NOT NULL,
                     archived        INTEGER DEFAULT 0,
-                    ref_path        TEXT
+                    ref_path        TEXT,
+                    expires_at      TEXT,
+                    expires_when    TEXT,
+                    expires_when_tag TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
                 CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
@@ -798,6 +806,20 @@ class PreferenceStorageManager:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (5, datetime.now().isoformat()),
+                )
+
+        if current < 6:
+            # v6: temporal expiry fields on knowledge (expires_at, expires_when, expires_when_tag)
+            for col in ("expires_at TEXT", "expires_when TEXT", "expires_when_tag TEXT"):
+                try:
+                    self._conn.execute(f"ALTER TABLE knowledge ADD COLUMN {col}")
+                    self._conn.commit()
+                except sqlite3.OperationalError:
+                    pass  # Column already exists (fresh DB)
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (6, datetime.now().isoformat()),
                 )
 
     def get_storage_info(self) -> Dict[str, Any]:
