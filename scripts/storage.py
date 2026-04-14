@@ -663,6 +663,21 @@ class KnowledgeStorage(SQLiteDB):
         with self._conn:
             self._conn.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))
 
+    def archive_expired(self) -> int:
+        """Archive entries where expires_at is past today. Returns count archived."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE knowledge SET archived = 1
+                WHERE expires_at IS NOT NULL
+                  AND expires_at < ?
+                  AND archived = 0
+                """,
+                (today,),
+            )
+            return cursor.rowcount
+
     @staticmethod
     def _row_to_entry(row: sqlite3.Row) -> KnowledgeEntry:
         d = dict(row)
