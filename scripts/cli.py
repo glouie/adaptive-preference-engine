@@ -1345,6 +1345,15 @@ class AdaptivePreferenceCLI:
                       "(no underscores or percent signs).", file=sys.stderr)
                 return
 
+        # Determine target storage
+        if getattr(args, 'confidential', False):
+            from scripts.storage import ConfidentialStorageManager
+            target_storage = ConfidentialStorageManager()
+            target_knowledge = target_storage.knowledge
+        else:
+            target_storage = self.storage
+            target_knowledge = self.storage.knowledge
+
         entry = KnowledgeEntry(
             id=generate_id("know"),
             partition=args.partition,
@@ -1361,19 +1370,26 @@ class AdaptivePreferenceCLI:
             expires_when=getattr(args, 'expires_when', None),
             expires_when_tag=getattr(args, 'expires_when_tag', None),
         )
-        self.storage.knowledge.save_entry(entry)
+        target_knowledge.save_entry(entry)
         print(f"Added: [{entry.partition}] {entry.title} ({entry.id})")
 
         # Trigger compaction check
         try:
             from scripts.compaction import CompactionEngine
-            engine = CompactionEngine(self.storage)
+            if getattr(args, 'confidential', False):
+                engine = CompactionEngine(knowledge_storage=target_knowledge)
+            else:
+                engine = CompactionEngine(storage=self.storage)
             compacted = engine.check_and_compact()
             for p in compacted:
                 print(f"  Compacted: {p}")
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning(f"Compaction check failed: {exc}")
+        finally:
+            # Close confidential storage if used
+            if getattr(args, 'confidential', False):
+                target_storage.close()
 
     def cmd_knowledge_search(self, args):
         all_entries = self.storage.knowledge.get_all_entries()
