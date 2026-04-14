@@ -162,13 +162,38 @@ class TestParseMemoryFile:
         md.write_text("---\nname: Proj\ndescription: d\ntype: project\n---\n\nContent\n")
         result = parse_memory_file(md)
         assert result["category"] == "context"
-        assert "projects/" in result["partition"]
+        assert result["partition"] == "projects/unknown"
 
     def test_maps_reference(self, tmp_path):
         md = tmp_path / "test.md"
         md.write_text("---\nname: Ref\ndescription: d\ntype: reference\n---\n\nContent\n")
         result = parse_memory_file(md)
         assert result["category"] == "reference"
+
+    def test_project_partition_roundtrip(self, public_mgr, tmp_path):
+        """Verify that projects/unknown partition is preserved through parse->save->retrieve."""
+        # Create a project-type memory file
+        md = tmp_path / "project_test.md"
+        md.write_text("---\nname: Project Fact\ndescription: d\ntype: project\n---\n\nContent\n")
+
+        # Parse it
+        parsed = parse_memory_file(md)
+        assert parsed["partition"] == "projects/unknown"
+
+        # Save to database
+        entry = make_entry(
+            title=parsed["name"],
+            content=parsed["content"],
+            category=parsed["category"],
+            partition=parsed["partition"],
+        )
+        public_mgr.knowledge.save_entry(entry)
+
+        # Retrieve and verify partition is preserved
+        retrieved = public_mgr.knowledge.get_entry(entry.id)
+        assert retrieved is not None
+        assert retrieved.partition == "projects/unknown", \
+            f"Expected partition 'projects/unknown', got '{retrieved.partition}'"
 
 
 class TestMemoryIntercept:
@@ -245,6 +270,7 @@ class TestInboxIngestion:
         assert len(entries) == 1
         assert entries[0].title == "Test Rule"
         assert entries[0].category == "preference"
+        assert entries[0].partition == "general"
         # Inbox file should be deleted after ingestion
         assert not md.exists()
 
@@ -256,7 +282,9 @@ class TestInboxIngestion:
         ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
         assert ingested == 1
         # Should be in confidential due to /Users/ pattern
-        assert len(confidential_mgr.knowledge.get_all_entries()) == 1
+        entries = confidential_mgr.knowledge.get_all_entries()
+        assert len(entries) == 1
+        assert entries[0].partition == "user"
         assert len(public_mgr.knowledge.get_all_entries()) == 0
 
     def test_dedup_skips_existing(self, public_mgr, confidential_mgr, tmp_path):
@@ -314,3 +342,18 @@ class TestInboxIngestion:
                 "SELECT content_hash FROM knowledge WHERE id = ?", (entry.id,)
             ).fetchone()
             assert row[0] is not None, f"Entry {entry.id} missing content_hash"
+
+    def test_ingests_project_with_correct_partition(self, public_mgr, confidential_mgr, tmp_path):
+        """Verify project-type memory is ingested with projects/unknown partition."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        md = inbox / "abc123_project_fact.md"
+        md.write_text("---\nname: Project Fact\ndescription: d\ntype: project\n---\n\nProject-specific knowledge\n")
+        ingested = ingest_inbox(inbox, public_mgr, confidential_mgr)
+        assert ingested == 1
+        entries = public_mgr.knowledge.get_all_entries()
+        assert len(entries) == 1
+        assert entries[0].title == "Project Fact"
+        assert entries[0].category == "context"
+        assert entries[0].partition == "projects/unknown", \
+            f"Expected partition 'projects/unknown', got '{entries[0].partition}'"
