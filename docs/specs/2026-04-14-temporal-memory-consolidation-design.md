@@ -50,7 +50,7 @@ A single SQLite database with a `confidential` flag creates coupling: the sync l
   ape-confidential.db     # Confidential store (new, same schema)
 ```
 
-Both databases share the same schema. The `KnowledgeStorage` class accepts a `db_path` parameter. A new `ConfidentialStorage` factory returns a `KnowledgeStorage` pointed at `ape-confidential.db`.
+Both databases share the same schema. A new `ConfidentialStorageManager` class (peer to `PreferenceStorageManager`) owns the confidential database connection and exposes only a `KnowledgeStorage` sub-manager — no preferences, associations, contexts, or signals.
 
 #### Schema (Applied to Both Databases)
 
@@ -481,7 +481,7 @@ ape: migrate confidential store from YAML to JSONL
 | File | Change |
 |---|---|
 | `src/adaptive_preference_engine/knowledge.py` | Add 3 temporal fields to KnowledgeEntry dataclass |
-| `scripts/storage.py` | Schema migration, `db_path` parameter, `ConfidentialStorage` factory |
+| `scripts/storage.py` | Schema migration v6, `ConfidentialStorageManager` class, `sync_meta` table |
 | `scripts/sync.py` | Dual-database export, dual-repo push/pull with conflict resolution |
 | `scripts/cli.py` | New flags: `--expires-at`, `--expires-when`, `--expires-when-tag`, `--confidential`; new subcommands: `knowledge import-memory`, `knowledge migrate-confidential` |
 | `scripts/session-start-hook.sh` | Add expires_at check (both DBs), inbox ingestion, memory .md generation, project hash discovery |
