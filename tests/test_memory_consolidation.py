@@ -97,6 +97,41 @@ class TestMemoryGeneration:
         tmp_files = list(memory_dir.glob(".*.tmp"))
         assert len(tmp_files) == 0
 
+    def test_cleans_stale_md_files(self, public_mgr, tmp_path):
+        """When an entry is archived/deleted, its .md file should be removed."""
+        # First generation: create an entry
+        public_mgr.knowledge.save_entry(make_entry(
+            id="know_1", title="Active Entry", content="Active content",
+        ))
+        public_mgr.knowledge.save_entry(make_entry(
+            id="know_2", title="Will Be Archived", content="Soon to be stale",
+        ))
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        count = generate_memory_files(public_mgr, None, memory_dir)
+        assert count == 2
+
+        # Verify both files exist
+        md_files = [f for f in memory_dir.glob("*.md") if f.name != "MEMORY.md"]
+        assert len(md_files) == 2
+
+        # Archive one entry
+        entry2 = public_mgr.knowledge.get_entry("know_2")
+        entry2.archived = True
+        public_mgr.knowledge.save_entry(entry2)
+
+        # Second generation: should remove the stale file
+        count = generate_memory_files(public_mgr, None, memory_dir)
+        assert count == 1
+
+        # Verify only one non-index .md file remains
+        md_files = [f for f in memory_dir.glob("*.md") if f.name != "MEMORY.md"]
+        assert len(md_files) == 1
+        assert "active_entry" in md_files[0].name.lower()
+
+        # MEMORY.md should still exist
+        assert (memory_dir / "MEMORY.md").exists()
+
 
 class TestParseMemoryFile:
     def test_parses_frontmatter(self, tmp_path):

@@ -37,12 +37,20 @@ def generate_memory_files(
     memory_dir = Path(memory_dir)
     memory_dir.mkdir(parents=True, exist_ok=True)
 
+    # Collect existing .md files (excluding MEMORY.md) for cleanup
+    existing_files = set()
+    if memory_dir.exists():
+        for f in memory_dir.glob("*.md"):
+            if f.name != "MEMORY.md":
+                existing_files.add(f)
+
     entries = public_mgr.knowledge.get_all_entries(include_archived=False)
     if confidential_mgr:
         entries += confidential_mgr.knowledge.get_all_entries(include_archived=False)
 
     generated = 0
     index_lines = []
+    generated_files = set()
 
     for entry in entries:
         mem_type = CATEGORY_TO_TYPE.get(entry.category, "project")
@@ -78,6 +86,15 @@ def generate_memory_files(
 
         index_lines.append(f"- [{entry.title}]({filename}) -- {entry.content[:60]}")
         generated += 1
+        generated_files.add(target)
+
+    # Remove stale .md files that weren't regenerated
+    stale_files = existing_files - generated_files
+    for stale_file in stale_files:
+        try:
+            stale_file.unlink()
+        except OSError:
+            pass  # Best effort cleanup
 
     # Generate MEMORY.md index
     index_content = "# Memory Index\n\n" + "\n".join(index_lines) + "\n"
