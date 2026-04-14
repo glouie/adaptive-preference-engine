@@ -1,5 +1,7 @@
 """Tests for memory consolidation. Run: pytest tests/test_memory_consolidation.py -v"""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 import pytest
@@ -130,3 +132,65 @@ class TestParseMemoryFile:
         md.write_text("---\nname: Ref\ndescription: d\ntype: reference\n---\n\nContent\n")
         result = parse_memory_file(md)
         assert result["category"] == "reference"
+
+
+class TestMemoryIntercept:
+    def test_copies_memory_file_to_inbox(self, tmp_path):
+        # Set up dirs
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        memory_dir = tmp_path / ".claude" / "projects" / "abc123" / "memory"
+        memory_dir.mkdir(parents=True)
+        # Write a memory file
+        mem_file = memory_dir / "feedback_test.md"
+        mem_file.write_text("---\nname: Test\ntype: feedback\n---\n\nContent\n")
+        # Simulate hook input
+        hook_input = json.dumps({
+            "tool": "Write",
+            "tool_input": {"file_path": str(mem_file)},
+        })
+        result = subprocess.run(
+            [sys.executable, "scripts/posttool-memory-intercept.py"],
+            input=hook_input, capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+            env={**dict(__import__("os").environ),
+                 "ADAPTIVE_CLI_INBOX": str(inbox)},
+        )
+        assert result.returncode == 0
+        inbox_files = list(inbox.glob("*.md"))
+        assert len(inbox_files) == 1
+        assert "abc123" in inbox_files[0].name
+
+    def test_skips_memory_index(self, tmp_path):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        hook_input = json.dumps({
+            "tool": "Write",
+            "tool_input": {"file_path": "/home/.claude/projects/abc/memory/MEMORY.md"},
+        })
+        result = subprocess.run(
+            [sys.executable, "scripts/posttool-memory-intercept.py"],
+            input=hook_input, capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+            env={**dict(__import__("os").environ),
+                 "ADAPTIVE_CLI_INBOX": str(inbox)},
+        )
+        assert result.returncode == 0
+        assert len(list(inbox.glob("*"))) == 0
+
+    def test_skips_non_memory_path(self, tmp_path):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        hook_input = json.dumps({
+            "tool": "Write",
+            "tool_input": {"file_path": "/home/user/code/main.py"},
+        })
+        result = subprocess.run(
+            [sys.executable, "scripts/posttool-memory-intercept.py"],
+            input=hook_input, capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+            env={**dict(__import__("os").environ),
+                 "ADAPTIVE_CLI_INBOX": str(inbox)},
+        )
+        assert result.returncode == 0
+        assert len(list(inbox.glob("*"))) == 0
