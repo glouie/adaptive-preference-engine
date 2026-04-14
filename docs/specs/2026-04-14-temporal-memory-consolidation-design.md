@@ -1,7 +1,7 @@
 # Temporal Support, Memory Consolidation & Confidential Store Design
 
 **Date:** 2026-04-14
-**Status:** Draft
+**Status:** Draft (rev 2 -- addressing adversarial review findings)
 **Supersedes:** None (extends existing knowledge and sync systems)
 
 ## Problem
@@ -31,15 +31,35 @@ APE has three gaps that prevent it from being the single persistence layer for A
 
 ## Design
 
-### 1. Schema Changes
+### 1. Schema Changes & Dual-Database Architecture
 
-Four new nullable columns on the `knowledge` table:
+#### Why Two Databases
+
+A single SQLite database with a `confidential` flag creates coupling: the sync layer must filter every query, the PostToolUse hook and session-end hook race on the same file, and a lock acquired during session-end push blocks the memory intercept hook. Separating into two databases eliminates these issues:
+
+- **No cross-store locking.** Public and confidential writes never contend on the same WAL.
+- **Independent sync.** Each database has its own JSONL export and git repo. Push to one repo can fail without blocking the other.
+- **Simpler queries.** No `WHERE confidential=X` filter on every read path.
+- **Clean compaction.** Each database compacts to its own repo without routing logic.
+
+#### Database Layout
+
+```
+~/.adaptive-cli/
+  ape.db                  # Public store (existing, extended)
+  ape-confidential.db     # Confidential store (new, same schema)
+```
+
+Both databases share the same schema. The `KnowledgeStorage` class accepts a `db_path` parameter. A new `ConfidentialStorage` factory returns a `KnowledgeStorage` pointed at `ape-confidential.db`.
+
+#### Schema (Applied to Both Databases)
+
+Three new nullable columns on the `knowledge` table:
 
 ```sql
 ALTER TABLE knowledge ADD COLUMN expires_at TEXT;
 ALTER TABLE knowledge ADD COLUMN expires_when TEXT;
 ALTER TABLE knowledge ADD COLUMN expires_when_tag TEXT;
-ALTER TABLE knowledge ADD COLUMN confidential INTEGER DEFAULT 0;
 ```
 
 | Column | Type | Purpose |
@@ -47,7 +67,8 @@ ALTER TABLE knowledge ADD COLUMN confidential INTEGER DEFAULT 0;
 | `expires_at` | TEXT (ISO date) | Hard calendar expiry. Auto-archive when `today > expires_at`. |
 | `expires_when` | TEXT | Human-readable trigger description (e.g., "10.5 GA ships"). Informational, not automated. |
 | `expires_when_tag` | TEXT | Signal tag to watch. During pruning, if a signal with this tag exists after the entry's `created_at`, the entry is surfaced for review. |
-| `confidential` | INTEGER (0/1) | 0 = public (syncs to glouie-assistant), 1 = confidential (syncs to private repo). |
+
+No `confidential` column needed -- the database file itself determines confidentiality.
 
 KnowledgeEntry dataclass updated:
 
@@ -58,21 +79,21 @@ class KnowledgeEntry:
     expires_at: Optional[str] = None
     expires_when: Optional[str] = None
     expires_when_tag: Optional[str] = None
-    confidential: bool = False
 ```
 
-Migration: `ALTER TABLE ADD COLUMN` applied on first access. Existing entries get `NULL`/`0` defaults. No data migration needed.
+Migration: `ALTER TABLE ADD COLUMN` applied on first access to each database. Existing entries get `NULL` defaults. No data migration needed for the public store. The confidential store is created fresh (see Section 2).
 
-### 2. Confidential Routing
+### 2. Confidential Routing (Dual-Database)
 
 #### Classification
 
-Confidential classification happens at write time via pattern matching.
+Confidential classification happens at write time. The classification determines which database receives the entry.
 
 Config additions:
 
 ```yaml
 confidential:
+  db_path: ~/.adaptive-cli/ape-confidential.db
   repo_path: ~/gitlab/gskills
   store_dir: .ape-confidential
   patterns:
@@ -84,51 +105,66 @@ confidential:
   auto_classify: true
 ```
 
-When `auto_classify: true`, every knowledge entry's `content` field is scanned against `confidential.patterns` at write time. If any pattern matches, `confidential=1` is set automatically. Entries can also be explicitly marked confidential via `--confidential` flag on CLI commands.
+When `auto_classify: true`, every knowledge entry's `content` field is scanned against `confidential.patterns` at write time. If any pattern matches, the entry is written to `ape-confidential.db` instead of `ape.db`. Entries can also be explicitly routed via `--confidential` flag on CLI commands.
+
+#### Write Path
+
+```
+cli.py knowledge add
+       |
+       +-- scan content against confidential.patterns
+       |
+       +-- match?  --> ape-confidential.db (confidential store)
+       +-- no match --> ape.db (public store)
+```
 
 #### Sync Push (Modified)
 
-The existing `SyncRunner.push()` method splits knowledge entries by the `confidential` flag:
+`SyncRunner.push()` operates on each database independently:
 
 ```
-SQLite knowledge table
-       |
-       +-- confidential=0 --> ~/learning/glouie-assistant/knowledge.jsonl
-       |                      git add + commit + push
-       |
-       +-- confidential=1 --> ~/gitlab/gskills/.ape-confidential/knowledge.jsonl
-                               git add + commit + push
+ape.db          --> ~/learning/glouie-assistant/knowledge.jsonl
+                    git add + commit + push
+
+ape-confidential.db --> ~/gitlab/gskills/.ape-confidential/knowledge.jsonl
+                        git add + commit + push
 ```
 
-Other tables (preferences, associations, contexts, signals) continue to sync only to the public repo. They contain behavioral patterns, not factual data -- no confidential routing needed.
+Other tables (preferences, associations, contexts, signals) live only in `ape.db` and sync to the public repo. They contain behavioral patterns, not factual data.
 
 #### Sync Pull (Modified)
 
-Pull imports from both repos:
+Pull imports into each database from its paired repo:
 
-1. `git pull` in public repo, import `knowledge.jsonl` (entries get `confidential=0`).
-2. `git pull` in confidential repo, import `knowledge.jsonl` (entries get `confidential=1`).
-3. Other tables imported from public repo only (unchanged).
+1. `git pull` in public repo, import `knowledge.jsonl` into `ape.db`.
+2. `git pull` in confidential repo, import `knowledge.jsonl` into `ape-confidential.db`.
+3. Other tables imported from public repo into `ape.db` only (unchanged).
+
+**Conflict resolution:** Both repos use `git pull --rebase`. If rebase fails (diverged history), fall back to `git stash && git pull && git stash pop`. If that also fails, log a warning and skip the pull -- local state is authoritative, and the next push will reconcile. JSONL import uses upsert (match on `id`), so duplicate entries from a messy merge are idempotent.
 
 #### Confidential Store Migration
 
-On first push after this change:
+CLI subcommand (not a separate script):
+
+```bash
+adaptive-cli knowledge migrate-confidential
+```
 
 1. Read existing `.ape-confidential/knowledge.yaml` entries.
-2. Convert to `KnowledgeEntry` objects with `confidential=1`.
-3. Save to SQLite.
+2. Convert to `KnowledgeEntry` objects.
+3. Save to `ape-confidential.db`.
 4. Write `.ape-confidential/knowledge.jsonl` (new format).
 5. Delete `.ape-confidential/knowledge.yaml`.
 6. Commit: `ape: migrate confidential store from YAML to JSONL`.
 
 #### Compaction
 
-Confidential entries with `ref_path` write their consolidated markdown files to the confidential repo:
+Each database compacts to its paired repo -- no routing logic needed:
 
-- Public: `~/learning/glouie-assistant/partitions/<partition>/consolidated.md`
-- Confidential: `~/gitlab/gskills/.ape-confidential/partitions/<partition>/consolidated.md`
+- `ape.db` entries: `~/learning/glouie-assistant/partitions/<partition>/consolidated.md`
+- `ape-confidential.db` entries: `~/gitlab/gskills/.ape-confidential/partitions/<partition>/consolidated.md`
 
-The compaction engine checks the `confidential` flag to determine the destination.
+The compaction engine takes a `storage` parameter; the caller passes the appropriate database.
 
 ### 3. Temporal Expiry
 
@@ -152,11 +188,11 @@ Only checks `expires_at` (calendar-based). No external queries, no user interact
 #### Pruning (On-Demand or Scheduled)
 
 ```
-For each non-archived entry:
+For each non-archived entry (in both ape.db and ape-confidential.db):
   1. expires_at past?            --> auto-archive
-  2. expires_when_tag set?       --> query signal table:
+  2. expires_when_tag set?       --> query signal table (in ape.db only):
      |                               SELECT COUNT(*) FROM signals
-     |                               WHERE context_tags LIKE '%' || tag || '%'
+     |                               WHERE ',' || context_tags || ',' LIKE '%,' || tag || ',%'
      |                               AND timestamp > entry.created_at
      |
      +-- signal found?           --> surface for review:
@@ -166,7 +202,13 @@ For each non-archived entry:
   3. Category TTL exceeded?      --> existing decay behavior (unchanged)
 ```
 
+**Tag matching:** Tags are stored comma-delimited. The query wraps `context_tags` in commas (`',' || context_tags || ','`) and searches for `,%tag,%` to prevent partial matches (e.g., tag `10.5` won't match `10.50` or `210.5`).
+
+**Cross-database signals:** Signal tags live in `ape.db` only (signals are behavioral, not confidential). When pruning `ape-confidential.db`, the pruner queries the signal table from `ape.db`. This is a read-only cross-database access -- no write contention.
+
 Non-interactive mode (`prune --auto`): archives `expires_at` entries, skips review prompts for tagged entries. Tagged entries wait for an interactive session.
+
+**Performance budget:** Session-start expiry check targets <200ms added latency. This is O(n) over knowledge entries with `expires_at` set -- acceptable for hundreds of entries. If entry count exceeds 1000, add an index: `CREATE INDEX IF NOT EXISTS idx_knowledge_expires ON knowledge(expires_at) WHERE expires_at IS NOT NULL`.
 
 #### CLI Surface
 
@@ -206,25 +248,26 @@ Main Session Agent (reads only)
        +-- User corrects agent --> agent runs cli.py signal (Bash subprocess)
        |                           signal processing happens in CLI, not agent
        |
-       +-- Agent writes to memory/ --> PostToolUse hook intercepts
-                                       ingests into APE, redirects to inbox
+       +-- Agent writes to memory/ --> PostToolUse hook queues to inbox
+                                       (copy, not move -- agent sees success)
 
 Hooks & Subagents (writes)
        |
        +-- SessionStart hook
-       |     +-- Check expires_at, auto-archive expired entries
+       |     +-- Check expires_at, auto-archive expired entries (both DBs)
+       |     +-- Ingest any pending inbox files into appropriate DB
        |     +-- Load preferences + knowledge for context
        |     +-- Generate memory .md files from relevant knowledge entries
        |
        +-- PostToolUse hook (Write|Edit targeting memory/ paths)
        |     +-- Detect write target is a memory directory
-       |     +-- Move written file to inbox (~/.adaptive-cli/memory-inbox/)
-       |     +-- Ingest content into APE knowledge via cli.py
-       |     +-- Classify confidential if content matches patterns
-       |     +-- Original write succeeded (agent not confused)
+       |     +-- Copy file to inbox (~/.adaptive-cli/memory-inbox/)
+       |     +-- Do NOT move or delete the original (agent may read it back)
+       |     +-- Do NOT ingest immediately (avoid rapid-fire DB writes)
        |
        +-- SessionEnd hook (Stop event)
-             +-- Export SQLite to JSONL (split public/confidential)
+             +-- Ingest any pending inbox files into appropriate DB
+             +-- Export both SQLite DBs to JSONL
              +-- Regenerate memory .md files from current knowledge
              +-- Git commit + push both repos
              +-- Clear memory inbox
@@ -237,13 +280,15 @@ Two directories, never mixed:
 | Path | Owner | Purpose |
 |---|---|---|
 | `~/.claude/projects/*/memory/` | APE (generated) | Canonical memory files, read by Claude Code |
-| `~/.adaptive-cli/memory-inbox/` | Agent (writes land here) | Staging area, ingested by APE then cleared |
+| `~/.adaptive-cli/memory-inbox/` | Agent (writes land here) | Staging area, ingested by APE at session boundaries |
 
-APE generates the canonical memory directory. If the agent writes to memory directly, the PostToolUse hook moves the file to the inbox and ingests it into APE. The agent sees a successful write. APE regenerates the canonical files on next session start or sync.
+**Batched ingestion:** The PostToolUse hook copies (not moves) the written file to the inbox. It does NOT ingest into APE immediately. Ingestion happens at two points: session-start (for files left from a crashed session) and session-end. This avoids race conditions where rapid sequential writes to memory files (e.g., writing a memory `.md` then updating `MEMORY.md`) would contend on the database.
+
+**Project hash discovery:** Claude Code stores memory at `~/.claude/projects/<hash>/memory/` where `<hash>` is derived from the working directory path. The session-start hook discovers the active project memory path by scanning `~/.claude/projects/*/memory/` directories and matching the one whose parent symlink or path component corresponds to the current `$PWD`. The hook caches the discovered path in `$CLAUDE_PROJECT_MEMORY_DIR` for use by other hooks in the same session.
 
 #### PostToolUse Hook (Memory Intercept)
 
-Added to `hooks.json`:
+Added to `hooks.json` (runs alongside existing signal detector -- both are independent):
 
 ```json
 {
@@ -264,23 +309,32 @@ Added to `hooks.json`:
 `posttool-memory-intercept.py` logic:
 
 1. Read tool result from stdin (JSON with `file_path`).
-2. If `file_path` does not contain `/memory/`, exit (not a memory write).
-3. If `file_path` ends with `MEMORY.md`, exit (index file, skip).
-4. Parse the `.md` file: extract YAML frontmatter (`name`, `description`, `type`) and body content.
-5. Map memory type to APE knowledge fields:
+2. If `file_path` does not contain `/memory/`, exit 0 (not a memory write).
+3. If `file_path` ends with `MEMORY.md`, exit 0 (index file, skip).
+4. Copy the file to `~/.adaptive-cli/memory-inbox/<basename>` (preserving content).
+5. Exit 0. No database writes, no moves, no classification. Fast path (<50ms).
+
+The actual ingestion logic (parsing frontmatter, classifying confidential, writing to DB) runs during session boundary hooks:
+
+1. Parse the `.md` file: extract YAML frontmatter (`name`, `description`, `type`) and body content.
+2. Map memory type to APE knowledge fields:
    - `type: feedback` --> `category: preference`
    - `type: user` --> `category: context`, `partition: user`
    - `type: project` --> `category: context`, `partition: projects/<project>`
    - `type: reference` --> `category: reference`
-6. Run `cli.py knowledge add --from-memory <inbox_path>` to ingest.
-7. Move the file from the memory directory to `~/.adaptive-cli/memory-inbox/`.
+3. Scan content against `confidential.patterns` to route to correct DB.
+4. Run upsert (match on title + content hash to avoid duplicates).
+5. Delete the inbox file after successful ingestion.
 
 #### Memory .md Generation
 
 During session-start and session-end hooks, APE generates memory files from its knowledge store:
 
-1. Query non-archived knowledge entries relevant to the current project context. Relevance is determined by matching entry `partition` and `tags` against the session's `context_tags` (derived from the working directory in `session-start-hook.sh`). Same matching logic as the existing knowledge compaction context injection.
-2. For each entry, generate a `.md` file with frontmatter:
+1. Query non-archived knowledge entries from both databases relevant to the current project context. Relevance is determined by matching entry `partition` and `tags` against the session's `context_tags` (derived from the working directory in `session-start-hook.sh`). Same matching logic as the existing knowledge compaction context injection.
+2. For each entry, check if a corresponding `.md` file already exists and compare timestamps:
+   - If the file's mtime is newer than the entry's `updated_at`, the file was modified externally -- ingest changes back into APE before overwriting.
+   - If the entry is newer or the file doesn't exist, generate/overwrite.
+3. For each entry, generate a `.md` file with frontmatter:
 
 ```markdown
 ---
@@ -292,12 +346,12 @@ type: <mapped from category>
 <content>
 ```
 
-3. Write to `~/.claude/projects/<project-hash>/memory/`.
-4. Generate `MEMORY.md` index from all active entries.
+4. Write to `~/.claude/projects/<project-hash>/memory/` (using cached `$CLAUDE_PROJECT_MEMORY_DIR`).
+5. Generate `MEMORY.md` index from all active entries.
 
 #### Migration of Existing Memory
 
-One-time command:
+CLI subcommand (not a separate script):
 
 ```bash
 adaptive-cli knowledge import-memory --scan
@@ -305,8 +359,9 @@ adaptive-cli knowledge import-memory --scan
 
 1. Scans all `~/.claude/projects/*/memory/*.md` files (excluding `MEMORY.md`).
 2. Parses frontmatter and content.
-3. Creates knowledge entries with appropriate partition, category, and confidential classification.
-4. After import, APE takes ownership of the memory directories.
+3. **Deduplication:** For each entry, compute a content hash (SHA-256 of title + content). Skip if an entry with the same hash already exists in either database. This makes the import idempotent -- safe to run multiple times.
+4. Creates knowledge entries with appropriate partition, category, and confidential classification (routed to the correct DB via pattern matching).
+5. After import, APE takes ownership of the memory directories.
 
 #### CLAUDE.md Changes
 
@@ -328,10 +383,10 @@ ELSE
 
 | Trigger | What happens | Where |
 |---|---|---|
-| SessionEnd (Stop hook) | Export + commit + push both repos | `session-end-hook.sh` |
-| After knowledge add | If 5+ unpushed changes, auto-push | Built into `cli.py knowledge add` |
-| After signal batch | If 10+ unpushed signals, auto-push | Built into signal processing |
-| Manual | `adaptive-cli sync push` | Unchanged |
+| SessionEnd (Stop hook) | Export both DBs + commit + push both repos | `session-end-hook.sh` |
+| After knowledge add | If 5+ unpushed changes, auto-push affected repo | Built into `cli.py knowledge add` |
+| After signal batch | If 10+ unpushed signals, auto-push public repo | Built into signal processing |
+| Manual | `adaptive-cli sync push` | Unchanged (pushes both repos) |
 
 #### SessionEnd Hook
 
@@ -354,11 +409,19 @@ New hook in `hooks.json`:
 
 `session-end-hook.sh`:
 
-1. Regenerate memory `.md` files from current knowledge entries.
-2. Export SQLite to JSONL (split public entries to public repo, confidential to private repo).
-3. Git commit + push public repo.
-4. Git commit + push confidential repo.
-5. Clear `~/.adaptive-cli/memory-inbox/`.
+1. Ingest any pending inbox files (batched ingestion from Section 4).
+2. Regenerate memory `.md` files from current knowledge entries (both DBs).
+3. Export `ape.db` to `~/learning/glouie-assistant/knowledge.jsonl`.
+4. Export `ape-confidential.db` to `~/gitlab/gskills/.ape-confidential/knowledge.jsonl`.
+5. Git commit + push public repo.
+6. Git commit + push confidential repo.
+7. Clear `~/.adaptive-cli/memory-inbox/`.
+
+**Stop hook reliability:** Claude Code's `Stop` event does not fire on `kill -9`, terminal close, or crash. To mitigate data loss from ungraceful exits:
+
+- The auto-push threshold (5 changes) ensures most data reaches the remote during normal operation.
+- Session-start hook checks for stale inbox files and ingests them (crash recovery).
+- A periodic push can be added later via cron (`adaptive-cli sync push --quiet` every 15 minutes) but is not required for v1 -- the auto-push threshold is sufficient.
 
 #### Config Additions
 
@@ -377,9 +440,19 @@ memory:
 
 If push fails (network, auth, etc.):
 
-1. Commit succeeds locally (data is safe).
-2. Log a warning, do not block the session.
+1. Commit succeeds locally (data is safe in the local git repo).
+2. Log a warning to stderr, do not block the session.
 3. Next session's sync push retries (local is ahead of remote, push will include all pending commits).
+4. Public and confidential pushes are independent -- one failing does not block the other.
+
+#### Pull Failure Handling
+
+If `git pull --rebase` fails during session-start:
+
+1. Attempt `git stash && git pull && git stash pop`.
+2. If that also fails, log a warning and skip the pull.
+3. Local state is authoritative for the current session.
+4. The next push will force-reconcile (JSONL import uses upsert by `id`).
 
 #### Git Commit Message Convention
 
@@ -394,36 +467,37 @@ ape: migrate confidential store from YAML to JSONL
 
 #### Schema
 
-| Table | Change |
-|---|---|
-| `knowledge` | Add columns: `expires_at`, `expires_when`, `expires_when_tag`, `confidential` |
+| Table | Database | Change |
+|---|---|---|
+| `knowledge` | Both (`ape.db`, `ape-confidential.db`) | Add columns: `expires_at`, `expires_when`, `expires_when_tag` |
 
 #### Files Modified
 
 | File | Change |
 |---|---|
-| `src/adaptive_preference_engine/knowledge.py` | Add 4 fields to KnowledgeEntry dataclass |
-| `scripts/storage.py` | Schema migration, confidential-aware queries |
-| `scripts/sync.py` | Split push/pull by confidential flag, dual-repo support |
-| `scripts/cli.py` | New flags: `--expires-at`, `--expires-when`, `--expires-when-tag`, `--confidential`, `knowledge import-memory` |
-| `scripts/session-start-hook.sh` | Add expires_at check, memory .md generation |
-| `scripts/compaction.py` | Route ref files to correct repo based on confidential flag |
+| `src/adaptive_preference_engine/knowledge.py` | Add 3 temporal fields to KnowledgeEntry dataclass |
+| `scripts/storage.py` | Schema migration, `db_path` parameter, `ConfidentialStorage` factory |
+| `scripts/sync.py` | Dual-database export, dual-repo push/pull with conflict resolution |
+| `scripts/cli.py` | New flags: `--expires-at`, `--expires-when`, `--expires-when-tag`, `--confidential`; new subcommands: `knowledge import-memory`, `knowledge migrate-confidential` |
+| `scripts/session-start-hook.sh` | Add expires_at check (both DBs), inbox ingestion, memory .md generation, project hash discovery |
+| `scripts/compaction.py` | Accept `storage` parameter, compact to paired repo |
 | `hooks/hooks.json` | Add Stop hook, add second PostToolUse entry for memory intercept (runs alongside existing signal detector, both are independent) |
 
 #### Files Created
 
 | File | Purpose |
 |---|---|
-| `scripts/session-end-hook.sh` | SessionEnd: export, generate memory, push both repos |
-| `scripts/posttool-memory-intercept.py` | Intercept memory writes, ingest into APE, redirect to inbox |
-| `scripts/memory_generator.py` | Generate `.md` files from knowledge entries for Claude Code |
-| `scripts/migrate_confidential.py` | One-time YAML to JSONL migration for confidential store |
-| `scripts/import_memory.py` | One-time import of existing memory `.md` files |
+| `scripts/session-end-hook.sh` | SessionEnd: ingest inbox, export both DBs, generate memory, push both repos |
+| `scripts/posttool-memory-intercept.py` | Copy memory writes to inbox (fast path, no DB writes) |
+| `scripts/memory_generator.py` | Generate `.md` files from knowledge entries for Claude Code, with timestamp comparison |
+
+Migration logic (`migrate-confidential`, `import-memory`) is implemented as CLI subcommands in `cli.py`, not separate scripts.
 
 #### Config Additions
 
 ```yaml
 confidential:
+  db_path: ~/.adaptive-cli/ape-confidential.db
   repo_path: ~/gitlab/gskills
   store_dir: .ape-confidential
   patterns: [...]
@@ -442,7 +516,11 @@ memory:
 ### 7. Safety & Rollback
 
 - **Schema migration is additive.** New columns are nullable with defaults. Existing code that doesn't read the new fields continues to work.
+- **Dual-database is backward-compatible.** The public `ape.db` retains its existing path and schema. Code that only reads `ape.db` is unaffected. The confidential database is new and additive.
 - **Confidential store migration preserves the YAML.** The YAML file is deleted only after successful JSONL write and SQLite import. Git history preserves the YAML.
-- **Memory import is non-destructive.** Existing `.md` files are read, not deleted. APE takes ownership by generating files on top of them. If APE breaks, the original files still exist in git history or the inbox.
-- **Push failure is non-blocking.** Local commits succeed regardless of push status. No data loss on network failure.
+- **Memory import is non-destructive and idempotent.** Existing `.md` files are read, not deleted. Deduplication via content hash prevents duplicates on re-run. APE takes ownership by generating files on top of them. If APE breaks, the original files still exist in git history or the inbox.
+- **Memory intercept is copy-not-move.** The PostToolUse hook copies to inbox rather than moving. The agent's view of the filesystem is never disrupted. Original files remain readable until APE regenerates them.
+- **Push failure is non-blocking.** Local commits succeed regardless of push status. Public and confidential pushes are independent. No data loss on network failure.
+- **Pull failure is non-blocking.** Session-start pull uses rebase with stash fallback. If both fail, local state is authoritative. The next push reconciles.
 - **Temporal auto-archive is reversible.** Archived entries remain in SQLite. `knowledge restore <id>` un-archives them.
+- **Crash recovery.** If a session dies before the Stop hook fires, the inbox retains unprocessed files. The next session's start hook ingests them. No data loss.
