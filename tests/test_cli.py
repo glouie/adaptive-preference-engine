@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 
 from scripts.cli import AdaptivePreferenceCLI
 from scripts.models import Preference, generate_id
+from adaptive_preference_engine.knowledge import KnowledgeEntry
 
 
 class CLITests(unittest.TestCase):
@@ -81,6 +82,76 @@ class CLITests(unittest.TestCase):
             rendered = out.getvalue()
             self.assertIn("What I learned", rendered)
             self.assertIn("communication.output_format.bullets", rendered)
+
+    def test_knowledge_expire_with_signal_flag(self):
+        with TemporaryDirectory() as tmpdir:
+            cli = AdaptivePreferenceCLI(tmpdir)
+
+            # Create entries with signal-based expiry
+            entry1 = KnowledgeEntry(
+                id=generate_id("know"),
+                partition="projects/test",
+                category="convention",
+                title="Expires on signal",
+                tags=["test"],
+                content="Should be archived when signal fires",
+                confidence=1.0,
+                token_estimate=25,
+                expires_when_tag="project-complete",
+                created_at="2026-01-01T00:00:00",
+            )
+            entry2 = KnowledgeEntry(
+                id=generate_id("know"),
+                partition="projects/test",
+                category="convention",
+                title="No signal yet",
+                tags=["test"],
+                content="Should not be archived",
+                confidence=1.0,
+                token_estimate=25,
+                expires_when_tag="future-event",
+                created_at="2026-01-01T00:00:00",
+            )
+            cli.storage.knowledge.save_entry(entry1)
+            cli.storage.knowledge.save_entry(entry2)
+
+            # Create a signal that matches entry1's expires_when_tag
+            cli.storage.signals._conn.execute(
+                """INSERT INTO signals (id, type, task, context_tags,
+                   emotional_indicators, preferences_used, associations_affected,
+                   preferences_affected, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    generate_id("sig"),
+                    "feedback",
+                    "project",
+                    "deploy,project-complete,ops",
+                    "[]",
+                    "[]",
+                    "[]",
+                    "[]",
+                    "2026-04-01T00:00:00",
+                ),
+            )
+            cli.storage.signals._conn.commit()
+
+            # Run expire with --signal flag
+            args = Namespace(quiet=False, signal=True)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                cli.cmd_knowledge_expire(args)
+
+            # Check that entry1 was archived
+            result1 = cli.storage.knowledge.get_entry(entry1.id)
+            self.assertTrue(result1.archived)
+
+            # Check that entry2 was not archived
+            result2 = cli.storage.knowledge.get_entry(entry2.id)
+            self.assertFalse(result2.archived)
+
+            # Check output
+            rendered = out.getvalue()
+            self.assertIn("signal-triggered", rendered)
+            self.assertIn("Archived 1 entries", rendered)
 
 
 if __name__ == "__main__":

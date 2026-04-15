@@ -31,6 +31,9 @@ class KnowledgeEntry:
     last_used: str = field(default_factory=lambda: datetime.now().isoformat())
     archived: bool = False
     ref_path: Optional[str] = None
+    expires_at: Optional[str] = None
+    expires_when: Optional[str] = None
+    expires_when_tag: Optional[str] = None
 
     def to_dict(self):
         return {
@@ -50,6 +53,9 @@ class KnowledgeEntry:
             "last_used": self.last_used,
             "archived": self.archived,
             "ref_path": self.ref_path,
+            "expires_at": self.expires_at,
+            "expires_when": self.expires_when,
+            "expires_when_tag": self.expires_when_tag,
         }
 
     @staticmethod

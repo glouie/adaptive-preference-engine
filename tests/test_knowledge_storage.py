@@ -122,3 +122,24 @@ class TestKnowledgeStorage:
         info = mgr.get_storage_info()
         assert "knowledge_count" in info
         assert info["knowledge_count"] == 1
+
+    def test_temporal_fields_default_none(self, mgr):
+        entry = make_entry(id="know_temporal")
+        mgr.knowledge.save_entry(entry)
+        result = mgr.knowledge.get_entry("know_temporal")
+        assert result.expires_at is None
+        assert result.expires_when is None
+        assert result.expires_when_tag is None
+
+    def test_save_and_retrieve_temporal_fields(self, mgr):
+        entry = make_entry(
+            id="know_temp_full",
+            expires_at="2026-05-01",
+            expires_when="10.5 GA ships",
+            expires_when_tag="10.5-shipped",
+        )
+        mgr.knowledge.save_entry(entry)
+        result = mgr.knowledge.get_entry("know_temp_full")
+        assert result.expires_at == "2026-05-01"
+        assert result.expires_when == "10.5 GA ships"
+        assert result.expires_when_tag == "10.5-shipped"

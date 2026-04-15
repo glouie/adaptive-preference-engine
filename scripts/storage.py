@@ -19,6 +19,7 @@ class JSONLStorageReadError(Exception):
         self.errors = errors
         super().__init__(f"Malformed JSONL in {filepath}: {errors}")
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -118,11 +119,13 @@ CREATE TABLE IF NOT EXISTS knowledge (
     created_at      TEXT NOT NULL,
     last_used       TEXT NOT NULL,
     archived        INTEGER DEFAULT 0,
-    ref_path        TEXT
+    ref_path        TEXT,
+    content_hash    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
 CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
 CREATE INDEX IF NOT EXISTS idx_know_archived  ON knowledge(archived);
+CREATE INDEX IF NOT EXISTS idx_know_content_hash ON knowledge(content_hash);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     version     INTEGER NOT NULL,
@@ -550,17 +553,22 @@ class KnowledgeStorage(SQLiteDB):
 
     def save_entry(self, entry: KnowledgeEntry) -> None:
         d = entry.to_dict()
+        # Compute content hash for deduplication
+        hash_data = f"{entry.title}\n{entry.content}\n{entry.category}\n{entry.partition}"
+        content_hash = hashlib.sha256(hash_data.encode("utf-8")).hexdigest()
         with self._conn:
             self._conn.execute(
                 """
                 INSERT INTO knowledge
                     (id, partition, category, title, tags, content, confidence,
                      source, machine_origin, decay_exempt, access_count,
-                     token_estimate, created_at, last_used, archived, ref_path)
+                     token_estimate, created_at, last_used, archived, ref_path,
+                     expires_at, expires_when, expires_when_tag, content_hash)
                 VALUES
                     (:id, :partition, :category, :title, :tags, :content, :confidence,
                      :source, :machine_origin, :decay_exempt, :access_count,
-                     :token_estimate, :created_at, :last_used, :archived, :ref_path)
+                     :token_estimate, :created_at, :last_used, :archived, :ref_path,
+                     :expires_at, :expires_when, :expires_when_tag, :content_hash)
                 ON CONFLICT(id) DO UPDATE SET
                     partition       = excluded.partition,
                     category        = excluded.category,
@@ -575,13 +583,18 @@ class KnowledgeStorage(SQLiteDB):
                     token_estimate  = excluded.token_estimate,
                     last_used       = excluded.last_used,
                     archived        = excluded.archived,
-                    ref_path        = excluded.ref_path
+                    ref_path        = excluded.ref_path,
+                    expires_at      = excluded.expires_at,
+                    expires_when    = excluded.expires_when,
+                    expires_when_tag = excluded.expires_when_tag,
+                    content_hash    = excluded.content_hash
                 """,
                 {
                     **d,
                     "tags": json.dumps(d["tags"]),
                     "decay_exempt": int(d["decay_exempt"]),
                     "archived": int(d["archived"]),
+                    "content_hash": content_hash,
                 },
             )
 
@@ -658,6 +671,48 @@ class KnowledgeStorage(SQLiteDB):
         with self._conn:
             self._conn.execute("DELETE FROM knowledge WHERE id = ?", (entry_id,))
 
+    def archive_expired(self) -> int:
+        """Archive entries where expires_at is past today. Returns count archived."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE knowledge SET archived = 1
+                WHERE expires_at IS NOT NULL
+                  AND expires_at < ?
+                  AND archived = 0
+                """,
+                (today,),
+            )
+            return cursor.rowcount
+
+    def find_triggered_entries(self, signals_conn) -> List[KnowledgeEntry]:
+        """Find entries whose expires_when_tag has a matching signal after created_at.
+
+        Args:
+            signals_conn: Connection to the database containing the signals table.
+                          For confidential DB entries, this is the public DB connection.
+        """
+        entries = self._conn.execute(
+            """SELECT * FROM knowledge
+               WHERE expires_when_tag IS NOT NULL
+                 AND archived = 0"""
+        ).fetchall()
+
+        triggered = []
+        for row in entries:
+            entry = self._row_to_entry(row)
+            tag = entry.expires_when_tag
+            count = signals_conn.execute(
+                """SELECT COUNT(*) FROM signals
+                   WHERE ',' || context_tags || ',' LIKE '%,' || ? || ',%'
+                     AND timestamp > ?""",
+                (tag, entry.created_at),
+            ).fetchone()[0]
+            if count > 0:
+                triggered.append(entry)
+        return triggered
+
     @staticmethod
     def _row_to_entry(row: sqlite3.Row) -> KnowledgeEntry:
         d = dict(row)
@@ -674,7 +729,7 @@ class PreferenceStorageManager:
     signals).  All sub-managers share the same on-disk database.
     """
 
-    _CURRENT_VERSION = 5
+    _CURRENT_VERSION = 7
 
     def __init__(self, base_dir: Optional[str] = None) -> None:
         if base_dir is None:
@@ -748,7 +803,10 @@ class PreferenceStorageManager:
                     created_at      TEXT NOT NULL,
                     last_used       TEXT NOT NULL,
                     archived        INTEGER DEFAULT 0,
-                    ref_path        TEXT
+                    ref_path        TEXT,
+                    expires_at      TEXT,
+                    expires_when    TEXT,
+                    expires_when_tag TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
                 CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
@@ -798,6 +856,41 @@ class PreferenceStorageManager:
                 self._conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (5, datetime.now().isoformat()),
+                )
+
+        if current < 6:
+            # v6: temporal expiry fields on knowledge (expires_at, expires_when, expires_when_tag)
+            for col in ("expires_at TEXT", "expires_when TEXT", "expires_when_tag TEXT"):
+                try:
+                    self._conn.execute(f"ALTER TABLE knowledge ADD COLUMN {col}")
+                    self._conn.commit()
+                except sqlite3.OperationalError:
+                    pass  # Column already exists (fresh DB)
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS sync_meta (
+                    last_push_at TEXT,
+                    last_pull_at TEXT
+                );
+            """)
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (6, datetime.now().isoformat()),
+                )
+
+        if current < 7:
+            # v7: content_hash column + index for O(1) deduplication
+            try:
+                self._conn.execute("ALTER TABLE knowledge ADD COLUMN content_hash TEXT")
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists (fresh DB)
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_know_content_hash ON knowledge(content_hash)")
+            self._conn.commit()
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (7, datetime.now().isoformat()),
                 )
 
     def get_storage_info(self) -> Dict[str, Any]:
@@ -901,6 +994,26 @@ class PreferenceStorageManager:
                 assert table in _RESET_TABLES  # belt-and-suspenders: only allowlisted names
                 self._conn.execute(f"DELETE FROM {table}")
 
+    def update_sync_meta(self, push_at=None, pull_at=None):
+        row = self._conn.execute("SELECT COUNT(*) FROM sync_meta").fetchone()[0]
+        if row == 0:
+            self._conn.execute(
+                "INSERT INTO sync_meta (last_push_at, last_pull_at) VALUES (?, ?)",
+                (push_at, pull_at),
+            )
+        else:
+            if push_at:
+                self._conn.execute("UPDATE sync_meta SET last_push_at = ?", (push_at,))
+            if pull_at:
+                self._conn.execute("UPDATE sync_meta SET last_pull_at = ?", (pull_at,))
+        self._conn.commit()
+
+    def get_sync_meta(self):
+        row = self._conn.execute("SELECT * FROM sync_meta").fetchone()
+        if row:
+            return {"last_push_at": row["last_push_at"], "last_pull_at": row["last_pull_at"]}
+        return {"last_push_at": None, "last_pull_at": None}
+
     def close(self) -> None:
         """Close the SQLite connection and checkpoint the WAL file. Idempotent."""
         if self._closed:
@@ -914,3 +1027,84 @@ class PreferenceStorageManager:
 
     def __exit__(self, _exc_type: object, _exc_val: object, _exc_tb: object) -> None:
         self.close()
+
+
+class ConfidentialStorageManager:
+    """Lightweight storage manager for the confidential database.
+
+    Only exposes a KnowledgeStorage — confidential DB has no preferences,
+    associations, contexts, or signals (those live in the public DB).
+    """
+
+    def __init__(self, base_dir=None):
+        if base_dir is None:
+            base_dir = os.path.expanduser("~/.adaptive-cli")
+        self.base_dir = Path(base_dir)
+        db_path = self.base_dir / "ape-confidential.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        _raw_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        _raw_conn.row_factory = sqlite3.Row
+        self._conn = _LockedConnection(_raw_conn, self._lock)
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS knowledge (
+                id              TEXT PRIMARY KEY,
+                partition       TEXT NOT NULL,
+                category        TEXT NOT NULL,
+                title           TEXT NOT NULL,
+                tags            TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                confidence      REAL DEFAULT 1.0,
+                source          TEXT DEFAULT 'explicit',
+                machine_origin  TEXT,
+                decay_exempt    INTEGER DEFAULT 0,
+                access_count    INTEGER DEFAULT 0,
+                token_estimate  INTEGER DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                last_used       TEXT NOT NULL,
+                archived        INTEGER DEFAULT 0,
+                ref_path        TEXT,
+                expires_at      TEXT,
+                expires_when    TEXT,
+                expires_when_tag TEXT,
+                content_hash    TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_know_partition ON knowledge(partition);
+            CREATE INDEX IF NOT EXISTS idx_know_category  ON knowledge(category);
+            CREATE INDEX IF NOT EXISTS idx_know_archived  ON knowledge(archived);
+            CREATE INDEX IF NOT EXISTS idx_know_content_hash ON knowledge(content_hash);
+            CREATE TABLE IF NOT EXISTS sync_meta (
+                last_push_at TEXT,
+                last_pull_at TEXT
+            );
+        """)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.commit()
+        self._closed = False
+        self.db_path = db_path
+        self.knowledge = KnowledgeStorage(self._conn)
+
+    def close(self):
+        if not self._closed:
+            self._conn.close()
+            self._closed = True
+
+    def update_sync_meta(self, push_at=None, pull_at=None):
+        row = self._conn.execute("SELECT COUNT(*) FROM sync_meta").fetchone()[0]
+        if row == 0:
+            self._conn.execute(
+                "INSERT INTO sync_meta (last_push_at, last_pull_at) VALUES (?, ?)",
+                (push_at, pull_at),
+            )
+        else:
+            if push_at:
+                self._conn.execute("UPDATE sync_meta SET last_push_at = ?", (push_at,))
+            if pull_at:
+                self._conn.execute("UPDATE sync_meta SET last_pull_at = ?", (pull_at,))
+        self._conn.commit()
+
+    def get_sync_meta(self):
+        row = self._conn.execute("SELECT * FROM sync_meta").fetchone()
+        if row:
+            return {"last_push_at": row["last_push_at"], "last_pull_at": row["last_pull_at"]}
+        return {"last_push_at": None, "last_pull_at": None}

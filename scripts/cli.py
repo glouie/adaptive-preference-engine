@@ -538,43 +538,47 @@ class AdaptivePreferenceCLI:
         """Export SQLite → JSONL and push to git remote."""
         cfg = AdaptiveConfig(str(self.storage.base_dir))
         if not cfg.sync_repo_path:
-            print("❌ No sync repo configured.")
-            print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
+            if not getattr(args, "quiet", False):
+                print("❌ No sync repo configured.")
+                print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
             return
         runner = SyncRunner(self.storage, cfg.sync_repo_path)
         result = runner.push()
-        if result["status"] == "up-to-date":
-            print("⚠️  Nothing to push — preferences are already up to date.")
-        else:
-            c = result["counts"]
-            if result["status"] == "pushed":
-                print("✅ Preferences pushed to sync repo.")
+        if not getattr(args, "quiet", False):
+            if result["status"] == "up-to-date":
+                print("⚠️  Nothing to push — preferences are already up to date.")
             else:
-                print("✅ Preferences exported and committed (no remote configured).")
-            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
-                  f"{c['contexts']} contexts, {c['signals']} signals")
-            if result.get("git_push_error"):
-                print(f"⚠️  git push failed: {result['git_push_error']}")
+                c = result["counts"]
+                if result["status"] == "pushed":
+                    print("✅ Preferences pushed to sync repo.")
+                else:
+                    print("✅ Preferences exported and committed (no remote configured).")
+                print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                      f"{c['contexts']} contexts, {c['signals']} signals")
+                if result.get("git_push_error"):
+                    print(f"⚠️  git push failed: {result['git_push_error']}")
 
     def cmd_sync_pull(self, args):
         """Pull from git remote and import JSONL → SQLite."""
         cfg = AdaptiveConfig(str(self.storage.base_dir))
         if not cfg.sync_repo_path:
-            print("❌ No sync repo configured.")
-            print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
+            if not getattr(args, "quiet", False):
+                print("❌ No sync repo configured.")
+                print("⚠️  Run: adaptive-cli sync configure --repo-path <path>")
             return
         runner = SyncRunner(self.storage, cfg.sync_repo_path)
         result = runner.pull()
-        c = result["counts"]
-        if result.get("git_pull_error"):
-            print(f"❌ git pull failed: {result['git_pull_error']}")
-            print("⚠️  Importing from local (possibly stale) repo state.")
-            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
-                  f"{c['contexts']} contexts, {c['signals']} signals imported from local state")
-        else:
-            print("✅ Preferences pulled from sync repo.")
-            print(f"   {c['preferences']} preferences, {c['associations']} associations, "
-                  f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
+        if not getattr(args, "quiet", False):
+            c = result["counts"]
+            if result.get("git_pull_error"):
+                print(f"❌ git pull failed: {result['git_pull_error']}")
+                print("⚠️  Importing from local (possibly stale) repo state.")
+                print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                      f"{c['contexts']} contexts, {c['signals']} signals imported from local state")
+            else:
+                print("✅ Preferences pulled from sync repo.")
+                print(f"   {c['preferences']} preferences, {c['associations']} associations, "
+                      f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
 
     def cmd_sync_status(self, args):
         """Show sync repo git status."""
@@ -1335,6 +1339,33 @@ class AdaptivePreferenceCLI:
     def cmd_knowledge_add(self, args):
         import socket
         from adaptive_preference_engine.knowledge import KnowledgeEntry
+        from scripts.confidential_classifier import is_confidential
+
+        # Validate expires_when_tag if provided
+        if args.expires_when_tag:
+            from scripts.tag_validation import validate_tag
+            if not validate_tag(args.expires_when_tag):
+                print(f"ERROR: Invalid tag '{args.expires_when_tag}'. "
+                      "Tags must match [a-zA-Z0-9][a-zA-Z0-9.-]* "
+                      "(no underscores or percent signs).", file=sys.stderr)
+                return
+
+        # Determine target storage
+        if getattr(args, 'confidential', False):
+            # Explicit flag — use confidential DB
+            from scripts.storage import ConfidentialStorageManager
+            target_storage = ConfidentialStorageManager()
+            target_knowledge = target_storage.knowledge
+        elif is_confidential(args.content) or is_confidential(args.title):
+            # Auto-classified — use confidential DB
+            from scripts.storage import ConfidentialStorageManager
+            target_storage = ConfidentialStorageManager()
+            target_knowledge = target_storage.knowledge
+        else:
+            # Public DB
+            target_storage = self.storage
+            target_knowledge = self.storage.knowledge
+
         entry = KnowledgeEntry(
             id=generate_id("know"),
             partition=args.partition,
@@ -1347,20 +1378,35 @@ class AdaptivePreferenceCLI:
             machine_origin=socket.gethostname(),
             decay_exempt=args.decay_exempt,
             token_estimate=len(args.content) // 4,
+            expires_at=getattr(args, 'expires_at', None),
+            expires_when=getattr(args, 'expires_when', None),
+            expires_when_tag=getattr(args, 'expires_when_tag', None),
         )
-        self.storage.knowledge.save_entry(entry)
+        target_knowledge.save_entry(entry)
         print(f"Added: [{entry.partition}] {entry.title} ({entry.id})")
 
         # Trigger compaction check
         try:
             from scripts.compaction import CompactionEngine
-            engine = CompactionEngine(self.storage)
+            if target_storage is self.storage:
+                # Using public storage
+                engine = CompactionEngine(storage=self.storage)
+            else:
+                # Using confidential storage
+                engine = CompactionEngine(
+                    knowledge_storage=target_knowledge,
+                    base_dir=str(target_storage.base_dir)
+                )
             compacted = engine.check_and_compact()
             for p in compacted:
                 print(f"  Compacted: {p}")
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning(f"Compaction check failed: {exc}")
+        finally:
+            # Close confidential storage if used
+            if target_storage is not self.storage:
+                target_storage.close()
 
     def cmd_knowledge_search(self, args):
         all_entries = self.storage.knowledge.get_all_entries()
@@ -1505,6 +1551,199 @@ class AdaptivePreferenceCLI:
         for e, _, _ in candidates:
             self.storage.knowledge.archive_entry(e.id)
         print(f"Archived {len(candidates)} entries.")
+
+    def cmd_knowledge_expire(self, args):
+        """Archive expired entries from both public and confidential stores."""
+        calendar_count = 0
+        signal_count = 0
+        conf_calendar_count = 0
+        conf_signal_count = 0
+
+        # Calendar-based expiry (always run)
+        calendar_count = self.storage.knowledge.archive_expired()
+
+        # Signal-triggered expiry (only if --signal flag is set)
+        if getattr(args, "signal", False):
+            # Get public DB connection for signals table
+            signals_conn = self.storage._conn
+
+            # Find and archive triggered entries in public DB
+            triggered = self.storage.knowledge.find_triggered_entries(signals_conn)
+            for entry in triggered:
+                self.storage.knowledge.archive_entry(entry.id)
+            signal_count = len(triggered)
+
+        # Also check confidential DB
+        try:
+            from scripts.storage import ConfidentialStorageManager
+            conf_mgr = ConfidentialStorageManager()
+            conf_calendar_count = conf_mgr.knowledge.archive_expired()
+
+            # Signal-triggered expiry for confidential DB (if --signal flag is set)
+            if getattr(args, "signal", False):
+                signals_conn = self.storage._conn  # Use public DB for signals
+                conf_triggered = conf_mgr.knowledge.find_triggered_entries(signals_conn)
+                for entry in conf_triggered:
+                    conf_mgr.knowledge.archive_entry(entry.id)
+                conf_signal_count = len(conf_triggered)
+
+            conf_mgr.close()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Confidential expiry failed: {e}")
+
+        if not getattr(args, "quiet", False):
+            total_calendar = calendar_count + conf_calendar_count
+            total_signal = signal_count + conf_signal_count
+            total = total_calendar + total_signal
+
+            if total > 0:
+                parts = []
+                if total_calendar > 0:
+                    parts.append(f"{total_calendar} calendar-expired")
+                if total_signal > 0:
+                    parts.append(f"{total_signal} signal-triggered")
+                parts.append(f"({calendar_count + signal_count} public, {conf_calendar_count + conf_signal_count} confidential)")
+                print(f"Archived {total} entries: {', '.join(parts)}")
+            else:
+                print("No expired entries found")
+
+    def cmd_knowledge_ingest_inbox(self, args):
+        """Ingest memory inbox files into knowledge stores."""
+        import os
+        from scripts.inbox_ingester import ingest_inbox
+        from scripts.storage import ConfidentialStorageManager
+        inbox = Path(os.path.expanduser("~/.adaptive-cli/memory-inbox"))
+        try:
+            conf_mgr = ConfidentialStorageManager()
+        except Exception:
+            conf_mgr = None
+        count = ingest_inbox(inbox, self.storage, conf_mgr)
+        if conf_mgr:
+            conf_mgr.close()
+        if not getattr(args, "quiet", False) and count > 0:
+            print(f"Ingested {count} entries from inbox")
+
+    def cmd_knowledge_generate_memory(self, args):
+        """Generate memory files for Claude Code from knowledge stores."""
+        from scripts.memory_generator import generate_memory_files
+        from scripts.storage import ConfidentialStorageManager
+        try:
+            conf_mgr = ConfidentialStorageManager()
+        except Exception:
+            conf_mgr = None
+        memory_dir = Path(args.memory_dir)
+        count = generate_memory_files(self.storage, conf_mgr, memory_dir)
+        if conf_mgr:
+            conf_mgr.close()
+        if not getattr(args, "quiet", False):
+            print(f"Generated {count} memory files in {memory_dir}")
+
+    def cmd_knowledge_import_memory(self, args):
+        """Import existing Claude Code memory files into knowledge stores."""
+        import os
+        import hashlib
+        from scripts.memory_generator import parse_memory_file
+        from scripts.confidential_classifier import is_confidential
+        from scripts.storage import ConfidentialStorageManager
+        from adaptive_preference_engine.knowledge import KnowledgeEntry
+
+        try:
+            conf_mgr = ConfidentialStorageManager()
+        except Exception:
+            conf_mgr = None
+
+        claude_projects = Path.home() / ".claude" / "projects"
+        if not claude_projects.exists():
+            print("No Claude Code projects found")
+            return
+
+        imported = 0
+        skipped = 0
+        for memory_dir in claude_projects.glob("*/memory"):
+            for md_file in memory_dir.glob("*.md"):
+                if md_file.name == "MEMORY.md":
+                    continue
+                parsed = parse_memory_file(md_file)
+                title = parsed["name"]
+                content = parsed["content"]
+                category = parsed["category"]
+                partition = parsed["partition"]
+
+                # Dedup
+                data = f"{title}\n{content}\n{category}\n{partition}"
+                ch = hashlib.sha256(data.encode()).hexdigest()
+                exists = False
+                for m in (self.storage, conf_mgr):
+                    if m is None:
+                        continue
+                    store = m.knowledge if hasattr(m, 'knowledge') else m
+                    for e in store.get_all_entries(include_archived=True):
+                        h = hashlib.sha256(
+                            f"{e.title}\n{e.content}\n{e.category}\n{e.partition}".encode()
+                        ).hexdigest()
+                        if h == ch:
+                            exists = True
+                            break
+                    if exists:
+                        break
+
+                if exists:
+                    skipped += 1
+                    continue
+
+                target = conf_mgr if (conf_mgr and is_confidential(content)) else self.storage
+                entry = KnowledgeEntry(
+                    id=generate_id("know"),
+                    partition=partition,
+                    category=category,
+                    title=title,
+                    tags=[],
+                    content=content,
+                    token_estimate=len(content.split()),
+                )
+                target.knowledge.save_entry(entry)
+                imported += 1
+
+        if conf_mgr:
+            conf_mgr.close()
+        if not getattr(args, "quiet", False):
+            print(f"Imported {imported} entries ({skipped} duplicates skipped)")
+
+    def cmd_knowledge_migrate_confidential(self, args):
+        """Migrate confidential YAML store to SQLite."""
+        import os
+        import yaml
+        from scripts.storage import ConfidentialStorageManager
+        from adaptive_preference_engine.knowledge import KnowledgeEntry
+
+        conf_mgr = ConfidentialStorageManager()
+        yaml_path = Path(os.path.expanduser("~/gitlab/gskills/.ape-confidential/knowledge.yaml"))
+
+        if not yaml_path.exists():
+            print("No confidential YAML store found — nothing to migrate")
+            conf_mgr.close()
+            return
+
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f) or []
+
+        migrated = 0
+        for item in data:
+            entry = KnowledgeEntry(
+                id=item.get("id", generate_id("know")),
+                partition=item.get("partition", "confidential"),
+                category=item.get("category", "context"),
+                title=item.get("title", "Untitled"),
+                tags=item.get("tags", []),
+                content=item.get("content", ""),
+                token_estimate=len(item.get("content", "").split()),
+            )
+            conf_mgr.knowledge.save_entry(entry)
+            migrated += 1
+
+        conf_mgr.close()
+        print(f"Migrated {migrated} entries from YAML to ape-confidential.db")
 
     def cmd_behavior_setup(self, args):
         """Run setup_script for each behavior (or the named one)."""
@@ -1702,8 +1941,11 @@ Examples:
     sync_cfg.add_argument("--repo-path", required=True,
                           help="Path to the git repo directory containing JSONL exports")
 
-    sync_sub.add_parser("push", help="Export to JSONL and push to remote")
-    sync_sub.add_parser("pull", help="Pull from remote and import into local SQLite")
+    sync_push = sync_sub.add_parser("push", help="Export to JSONL and push to remote")
+    sync_push.add_argument("--quiet", action="store_true", help="Suppress output")
+
+    sync_pull = sync_sub.add_parser("pull", help="Pull from remote and import into local SQLite")
+    sync_pull.add_argument("--quiet", action="store_true", help="Suppress output")
     sync_sub.add_parser("status", help="Show sync repo git status")
 
     # onboard
@@ -1947,6 +2189,10 @@ Examples:
     know_add.add_argument("--tags", nargs="+", default=[], help="Tags for discovery")
     know_add.add_argument("--confidence", type=float, default=1.0)
     know_add.add_argument("--decay-exempt", action="store_true", dest="decay_exempt")
+    know_add.add_argument("--expires-at", help="ISO date for calendar-based expiry (YYYY-MM-DD)")
+    know_add.add_argument("--expires-when", help="Human-readable expiry trigger description")
+    know_add.add_argument("--expires-when-tag", help="Signal tag to watch for event-based expiry")
+    know_add.add_argument("--confidential", action="store_true", help="Route to confidential store")
 
     know_search = knowledge_sub.add_parser("search", help="Search knowledge entries")
     know_search.add_argument("query", help="Search query (matches title, content, tags)")
@@ -1966,6 +2212,23 @@ Examples:
 
     know_restore = knowledge_sub.add_parser("restore", help="Restore an archived entry")
     know_restore.add_argument("entry_id", help="Entry ID")
+
+    know_expire = knowledge_sub.add_parser("expire", help="Archive expired entries")
+    know_expire.add_argument("--quiet", action="store_true")
+    know_expire.add_argument("--signal", action="store_true", help="Also check signal-triggered expiry")
+
+    know_ingest = knowledge_sub.add_parser("ingest-inbox", help="Ingest pending memory inbox files")
+    know_ingest.add_argument("--quiet", action="store_true")
+
+    know_genmem = knowledge_sub.add_parser("generate-memory", help="Generate memory .md files")
+    know_genmem.add_argument("--memory-dir", required=True, help="Target memory directory")
+    know_genmem.add_argument("--quiet", action="store_true")
+
+    know_import = knowledge_sub.add_parser("import-memory", help="Import existing Claude Code memory")
+    know_import.add_argument("--scan", action="store_true", help="Scan all project memory dirs")
+    know_import.add_argument("--quiet", action="store_true")
+
+    know_migrate = knowledge_sub.add_parser("migrate-confidential", help="Migrate confidential YAML store to SQLite")
 
     # Top-level prune
     prune_parser = subparsers.add_parser("prune", help="Find and archive stale knowledge entries")
@@ -2145,6 +2408,16 @@ Examples:
                 cli.cmd_knowledge_archive(args)
             elif args.knowledge_subcommand == "restore":
                 cli.cmd_knowledge_restore(args)
+            elif args.knowledge_subcommand == "expire":
+                cli.cmd_knowledge_expire(args)
+            elif args.knowledge_subcommand == "ingest-inbox":
+                cli.cmd_knowledge_ingest_inbox(args)
+            elif args.knowledge_subcommand == "generate-memory":
+                cli.cmd_knowledge_generate_memory(args)
+            elif args.knowledge_subcommand == "import-memory":
+                cli.cmd_knowledge_import_memory(args)
+            elif args.knowledge_subcommand == "migrate-confidential":
+                cli.cmd_knowledge_migrate_confidential(args)
             else:
                 knowledge_parser.print_help()
 

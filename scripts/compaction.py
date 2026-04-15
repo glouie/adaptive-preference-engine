@@ -43,19 +43,36 @@ class CompactionEngine:
     consolidated database entry with ref_path.
     """
 
-    def __init__(self, storage: PreferenceStorageManager):
+    def __init__(self, storage: PreferenceStorageManager = None, knowledge_storage=None, base_dir: str = None):
         """
         Initialize compaction engine.
 
         Args:
-            storage: PreferenceStorageManager instance
+            storage: PreferenceStorageManager instance (optional if knowledge_storage provided)
+            knowledge_storage: KnowledgeStorage instance (optional, defaults to storage.knowledge)
+            base_dir: Base directory path (required if knowledge_storage provided without storage)
         """
         self.storage = storage
-        self.adaptive_config = AdaptiveConfig(storage.base_dir)
+
+        # Determine knowledge storage
+        if knowledge_storage:
+            self.knowledge = knowledge_storage
+        elif storage:
+            self.knowledge = storage.knowledge
+        else:
+            raise ValueError("Either storage or knowledge_storage must be provided")
+
+        # Get base_dir for config
+        if storage:
+            base_dir = storage.base_dir
+        elif base_dir is None:
+            raise ValueError("base_dir must be provided when using knowledge_storage without storage")
+
+        self.adaptive_config = AdaptiveConfig(base_dir)
 
         # Load APE config with budgets
         self.ape_config = APEConfig.load(
-            str(storage.base_dir),
+            str(base_dir),
             sync_repo_path=self.adaptive_config.sync_repo_path
         )
 
@@ -147,7 +164,7 @@ class CompactionEngine:
         """
         partition_tokens: Dict[str, int] = {}
 
-        all_entries = self.storage.knowledge.get_all_entries(include_archived=False)
+        all_entries = self.knowledge.get_all_entries(include_archived=False)
 
         for entry in all_entries:
             if entry.partition not in partition_tokens:
@@ -214,7 +231,7 @@ class CompactionEngine:
         """
         counts: Dict[str, int] = {}
 
-        all_entries = self.storage.knowledge.get_all_entries(include_archived=False)
+        all_entries = self.knowledge.get_all_entries(include_archived=False)
 
         for entry in all_entries:
             counts[entry.partition] = counts.get(entry.partition, 0) + 1
@@ -239,7 +256,7 @@ class CompactionEngine:
             True if compaction succeeded, False otherwise
         """
         # Fetch entries to compact
-        entries = self.storage.knowledge.get_entries_by_partition(
+        entries = self.knowledge.get_entries_by_partition(
             partition,
             include_archived=False
         )
@@ -269,7 +286,10 @@ class CompactionEngine:
 
         # Prepare ref file path
         sync_repo = Path(self.sync_repo_path)
-        partition_dir = sync_repo / "partitions" / partition.replace("/", "_")
+        # Encode partition name to avoid collisions (e.g., "projects/foo/bar" vs "projects_foo_bar")
+        # Use URL-safe encoding: replace "/" with "__" and "_" with "_u"
+        safe_partition = partition.replace("_", "_u").replace("/", "__")
+        partition_dir = sync_repo / "partitions" / safe_partition
         partition_dir.mkdir(parents=True, exist_ok=True)
 
         ref_file = partition_dir / "consolidated.md"
@@ -329,11 +349,11 @@ class CompactionEngine:
             )
 
         # Save consolidated entry
-        self.storage.knowledge.save_entry(consolidated_entry)
+        self.knowledge.save_entry(consolidated_entry)
 
         # Archive original entries
         for entry in regular_entries:
-            self.storage.knowledge.archive_entry(entry.id)
+            self.knowledge.archive_entry(entry.id)
 
         # Calculate tokens saved
         original_tokens = sum(entry.token_estimate for entry in regular_entries)

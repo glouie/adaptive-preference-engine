@@ -29,6 +29,25 @@
             "command": "python3 $CLAUDE_PLUGIN_ROOT/scripts/posttool-signal-detector.py"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/scripts/posttool-memory-intercept.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/scripts/session-end-hook.sh"
+          }
+        ]
       }
     ]
   }
