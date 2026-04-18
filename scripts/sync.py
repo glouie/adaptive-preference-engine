@@ -199,6 +199,32 @@ class ConfidentialSync:
             d["tags"] = json.dumps(d["tags"])
             records.append(d)
         _write_jsonl(dest_dir / "knowledge.jsonl", records)
+
+        # Regenerate index.yaml catalog
+        index_entries = []
+        for e in entries:
+            tags = e.tags if isinstance(e.tags, list) else json.loads(e.tags) if e.tags else []
+            index_entries.append({
+                "id": e.id,
+                "partition": e.partition,
+                "category": e.category,
+                "title": e.title,
+                "tags": tags,
+                "confidence": e.confidence,
+                "created_at": str(e.created_at),
+                "last_used": str(e.last_used),
+                "access_count": e.access_count,
+                "decay_exempt": e.decay_exempt,
+                "file_path": "knowledge.jsonl",
+                "token_estimate": e.token_estimate,
+            })
+        try:
+            import yaml
+            with open(dest_dir / "index.yaml", "w") as f:
+                yaml.dump({"entries": index_entries}, f, default_flow_style=False, allow_unicode=True)
+        except ImportError:
+            pass
+
         return {"knowledge": len(records)}
 
     @staticmethod

@@ -572,7 +572,7 @@ class AdaptivePreferenceCLI:
                     conf_counts = ConfidentialSync.export(conf_mgr, dest)
                     status = _git_safe(["status", "--porcelain"], cwd=conf_repo)
                     if status and status.strip():
-                        _git(["add", "knowledge.jsonl"], cwd=conf_repo)
+                        _git(["add", "knowledge.jsonl", "index.yaml"], cwd=conf_repo)
                         msg = f"sync: export confidential knowledge {datetime.now().strftime('%Y-%m-%d %H:%M')}"
                         _git(["commit", "-m", msg], cwd=conf_repo)
                     if not getattr(args, "quiet", False):
