@@ -23,8 +23,9 @@ from scripts.storage import PreferenceStorageManager
 from scripts.preference_loader import PreferenceLoader
 from adaptive_preference_engine.services.signals import SignalProcessor, StrengthCalculator
 from adaptive_preference_engine.services.tiering import TieringEngine
-from scripts.config import AdaptiveConfig
-from scripts.sync import SyncRunner
+from scripts.config import AdaptiveConfig, APEConfig
+from scripts.sync import SyncRunner, ConfidentialSync, _git, _git_safe
+from scripts.storage import ConfidentialStorageManager
 from scripts.preference_templates import list_templates, get_template
 from scripts.onboarding import OnboardingSystem
 from scripts.cli_utils import success, error, warn
@@ -469,7 +470,6 @@ class AdaptivePreferenceCLI:
     def cmd_show_stats(self, args):
         """Show storage statistics"""
         info = self.storage.get_storage_info()
-        from scripts.config import APEConfig
         cfg = APEConfig.load(str(self.storage.base_dir))
 
         knowledge_entries = self.storage.knowledge.get_all_entries()
@@ -558,6 +558,29 @@ class AdaptivePreferenceCLI:
                 if result.get("git_push_error"):
                     print(f"⚠️  git push failed: {result['git_push_error']}")
 
+        # Confidential store — local commit only, no git push
+        ape_cfg = APEConfig.load(str(self.storage.base_dir))
+        conf_cfg = ape_cfg.get("confidential") or {}
+        conf_repo_str = conf_cfg.get("repo_path") if isinstance(conf_cfg, dict) else None
+        if conf_repo_str:
+            conf_repo = Path(conf_repo_str).expanduser()
+            if conf_repo.exists():
+                store_dir = conf_cfg.get("store_dir", ".")
+                dest = conf_repo if store_dir == "." else conf_repo / store_dir
+                conf_mgr = ConfidentialStorageManager()
+                try:
+                    conf_counts = ConfidentialSync.export(conf_mgr, dest)
+                    status = _git_safe(["status", "--porcelain"], cwd=conf_repo)
+                    if status and status.strip():
+                        _git(["add", "knowledge.jsonl"], cwd=conf_repo)
+                        msg = f"sync: export confidential knowledge {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                        _git(["commit", "-m", msg], cwd=conf_repo)
+                    if not getattr(args, "quiet", False):
+                        n = conf_counts.get("knowledge", 0)
+                        print(f"   {n} confidential knowledge entries committed (local only)")
+                finally:
+                    conf_mgr.close()
+
     def cmd_sync_pull(self, args):
         """Pull from git remote and import JSONL → SQLite."""
         cfg = AdaptiveConfig(str(self.storage.base_dir))
@@ -579,6 +602,25 @@ class AdaptivePreferenceCLI:
                 print("✅ Preferences pulled from sync repo.")
                 print(f"   {c['preferences']} preferences, {c['associations']} associations, "
                       f"{c['contexts']} contexts, {c['signals']} signals imported/updated")
+
+        # Confidential store — local read only, no git pull
+        ape_cfg = APEConfig.load(str(self.storage.base_dir))
+        conf_cfg = ape_cfg.get("confidential") or {}
+        conf_repo_str = conf_cfg.get("repo_path") if isinstance(conf_cfg, dict) else None
+        if conf_repo_str:
+            conf_repo = Path(conf_repo_str).expanduser()
+            if conf_repo.exists():
+                store_dir = conf_cfg.get("store_dir", ".")
+                src = conf_repo if store_dir == "." else conf_repo / store_dir
+                conf_mgr = ConfidentialStorageManager()
+                try:
+                    conf_counts = ConfidentialSync.import_from(conf_mgr, src)
+                    if not getattr(args, "quiet", False):
+                        n = conf_counts.get("knowledge", 0)
+                        if n:
+                            print(f"   {n} confidential knowledge entries imported (local only)")
+                finally:
+                    conf_mgr.close()
 
     def cmd_sync_status(self, args):
         """Show sync repo git status."""
@@ -1521,7 +1563,6 @@ class AdaptivePreferenceCLI:
         print(f"Restored: {args.entry_id}")
 
     def cmd_knowledge_prune(self, args):
-        from scripts.config import APEConfig
         cfg = APEConfig.load(str(self.storage.base_dir))
         entries = self.storage.knowledge.get_all_entries()
         now = datetime.now()
