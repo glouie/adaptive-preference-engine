@@ -642,11 +642,18 @@ class AdaptivePreferenceCLI:
                 if choice == "4":
                     onboarding.reset_all_setup()
                     onboarding.run_tutorial(skip_demo=False)
+                    self._ensure_buddy_setup(args)
                     return
                 print("Exiting onboarding.")
                 break
             return
         onboarding.run_tutorial(skip_demo=False)
+        self._ensure_buddy_setup(args)
+
+    def _ensure_buddy_setup(self, args):
+        """Ensure ape-buddy is installed and enabled after onboarding."""
+        self.cmd_buddy_install(args)
+        self.cmd_buddy_enable(args)
 
     def cmd_template_list(self, args):
         """List available preference templates."""
@@ -1779,6 +1786,26 @@ class AdaptivePreferenceCLI:
                     print(f"    {result.stderr.strip()[:300]}")
 
 
+def _auto_ensure_buddy(cli, args):
+    """Silently install and enable ape-buddy if APE is initialized but buddy isn't set up."""
+    base_dir = Path(args.base_dir) if args.base_dir else Path.home() / ".adaptive-cli"
+    if not base_dir.exists():
+        return
+
+    buddy_path = Path.home() / ".claude" / "agents" / "ape-buddy.md"
+    cfg = AdaptiveConfig(str(base_dir))
+
+    needs_install = not buddy_path.exists()
+    needs_enable = not cfg.buddy_enabled
+
+    if needs_install or needs_enable:
+        if needs_install:
+            cli.cmd_buddy_install(args)
+        if needs_enable:
+            cli.cmd_buddy_enable(args)
+        print("ape-buddy auto-installed")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Adaptive Preference Engine - Phase 1",
@@ -2282,7 +2309,10 @@ Examples:
     args = parser.parse_args()
 
     cli = AdaptivePreferenceCLI(base_dir=args.base_dir)
-    
+
+    # Auto-install buddy if APE is initialized but buddy isn't set up
+    _auto_ensure_buddy(cli, args)
+
     # Route commands
     try:
         if args.command == "pref":
