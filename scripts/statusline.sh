@@ -22,6 +22,8 @@ cwd     = ws.get('current_dir') or data.get('cwd', '')
 dirname = os.path.basename(cwd) if cwd else '?'
 ctx     = data.get('context_window') or {}
 pct     = int(ctx.get('used_percentage', 0) or 0)
+MODEL_CTX = {'Sonnet': 200000, 'Opus': 200000, 'Haiku': 200000}
+max_ctx = next((v for k, v in MODEL_CTX.items() if k.lower() in model.lower()), None)
 cost_d  = data.get('cost') or {}
 cost    = cost_d.get('total_cost_usd', 0) or 0
 dur_ms  = cost_d.get('total_duration_ms', 0) or 0
@@ -72,7 +74,13 @@ bar_color = RED if pct >= 90 else YELLOW if pct >= 70 else GREEN
 bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
 mins = dur_ms // 60000
 secs = (dur_ms % 60000) // 1000
-parts2 = [f'{bar_color}{bar}{RESET} {pct}%', f'{YELLOW}\${cost:.2f}{RESET}', f'⏱️  {mins}m {secs}s']
+if max_ctx:
+    used_k = round(pct * max_ctx / 100000)
+    max_k  = max_ctx // 1000
+    ctx_seg = f'{bar_color}{bar}{RESET} {pct}% ({used_k}K / {max_k}K)'
+else:
+    ctx_seg = f'{bar_color}{bar}{RESET} {pct}%'
+parts2 = [ctx_seg, f'{YELLOW}\${cost:.2f}{RESET}', f'⏱️  {mins}m {secs}s']
 if five_h is not None:
     parts2.append(f'5h:{five_h:.0f}%')
 if week is not None:
