@@ -163,7 +163,9 @@ Printed to stderr on completion:
 
 `SKIP_REVIEW=1 git push` — skips workers, writes report with `[SKIPPED]` status, push proceeds.
 
-Never silently skips: report always written.
+- Never silently skips: report always written.
+- Prints warning to stderr: `⚠  SKIP_REVIEW is set — adversarial review bypassed`
+- Not recommended in CI: any process that can set env vars can bypass all blocking.
 
 ## Installation (install.sh)
 
@@ -181,8 +183,11 @@ Never silently skips: report always written.
 | 3 | Timeout = block | Fail-safe: a slow/broken review should not silently pass a push |
 | 4 | Unknown severity → MEDIUM | Never silently drop findings |
 | 5 | Compaction threshold ≤ 2 → block | 2 cycles is too fragile for production instruction integrity |
-| 6 | Reports preserved indefinitely | Audit trail; user can prune manually |
-| 7 | SKIP_REVIEW always writes report | Bypass is visible, not silent |
-| 8 | Cross-model diversity | Claude reviews what Codex writes and vice versa — reduces blind spots |
-| 9 | Red-team pass 1 + pass 2 in parallel | Both take similar time; no dependency between them |
-| 10 | New branch → compare against main/master/HEAD~1 | Graceful fallback when no remote tracking branch exists |
+| 6 | Missing `COMPACTION_CYCLES` → block | Fail-safe: model refusal or format deviation must not silently pass |
+| 7 | Reports preserved indefinitely | Audit trail; user can prune manually |
+| 8 | SKIP_REVIEW always writes report + warns stderr | Bypass is visible, not silent |
+| 9 | Cross-model diversity | Claude reviews what Codex writes and vice versa — reduces blind spots |
+| 10 | Red-team pass 1 + pass 2 in parallel | Both take similar time; no dependency between them |
+| 11 | New branch → compare against main/master/HEAD~1 | Graceful fallback when no remote tracking branch exists |
+| 12 | Report filename sanitized (alphanumeric/-/_) | Prevents path traversal from malicious repo/branch names |
+| 13 | Instruction stack snapshotted before workers launch | Avoids race condition if push itself adds agent `.md` files |
