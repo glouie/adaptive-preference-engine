@@ -1646,6 +1646,7 @@ class AdaptivePreferenceCLI:
         for e, _, _ in candidates:
             self.storage.knowledge.archive_entry(e.id)
         print(f"Archived {len(candidates)} entries.")
+        _run_assoc_generate(self.storage, getattr(self.storage, 'base_dir', None))
 
     def cmd_knowledge_expire(self, args):
         """Archive expired entries from both public and confidential stores."""

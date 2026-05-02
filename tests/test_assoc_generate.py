@@ -76,3 +76,30 @@ class TestAssocGenerate(unittest.TestCase):
                 cli.cmd_assoc_generate(Namespace(if_stale=False))
             count_after_second = len(cli.storage.associations.get_all_associations())
             self.assertEqual(count_after_first, count_after_second)
+
+    def test_prune_triggers_assoc_generate(self):
+        with TemporaryDirectory() as tmpdir:
+            cli = self._make_cli(tmpdir)
+            for _ in range(5):
+                self._add_signal_with_both_prefs(cli)
+
+            # Add a knowledge entry old enough to be pruned
+            from adaptive_preference_engine.knowledge import KnowledgeEntry
+            from datetime import datetime, timedelta
+            old_date = (datetime.now() - timedelta(days=400)).isoformat()
+            entry = KnowledgeEntry(
+                id=generate_id("know"),
+                partition="project",
+                category="workflow",
+                title="Old entry",
+                tags=[],
+                content="old",
+                last_used=old_date,
+            )
+            cli.storage.knowledge.save_entry(entry)
+
+            with redirect_stdout(io.StringIO()):
+                cli.cmd_knowledge_prune(Namespace(dry_run=False))
+
+            assocs = cli.storage.associations.get_all_associations()
+            self.assertGreater(len(assocs), 0)
