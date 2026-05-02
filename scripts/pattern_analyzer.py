@@ -9,10 +9,10 @@ from datetime import datetime
 from collections import defaultdict
 import json
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models import Signal, generate_id
-from storage import PreferenceStorageManager
+from scripts.models import Signal, generate_id
+from scripts.storage import PreferenceStorageManager
 
 
 class AffinityCalculator:
@@ -39,7 +39,7 @@ class AffinityCalculator:
         total_signals = len(signals)
         
         for signal in signals:
-            prefs_in_signal = set(signal.preferences_used if hasattr(signal, "preferences_used") else signal.get("preferences_used", []))
+            prefs_in_signal = set(signal.preferences_used)
             
             # Count pairs
             prefs_list = sorted(list(prefs_in_signal))
@@ -154,7 +154,7 @@ class ClusterAnalyzer:
                     # Calculate average affinity with cluster members
                     avg_affinity = 0
                     for member in cluster:
-                        pair = tuple(sorted([pref, member]))
+                        pair = (min(pref, member), max(pref, member))
                         if pair in affinities:
                             avg_affinity += affinities[pair]
                     
@@ -215,7 +215,7 @@ class ClusterAnalyzer:
         co_occurrence_count = 0
         
         for signal in signals:
-            prefs = set(signal.preferences_used if hasattr(signal, "preferences_used") else signal.get("preferences_used", []))
+            prefs = set(signal.preferences_used)
             if cluster.issubset(prefs):
                 co_occurrence_count += 1
         
