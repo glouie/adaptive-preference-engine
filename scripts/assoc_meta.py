@@ -27,7 +27,7 @@ class AssocMeta:
                 last_run_at=data.get("last_run_at"),
                 signals_since_last_run=int(data.get("signals_since_last_run", 0)),
             )
-        except Exception:
+        except (OSError, json.JSONDecodeError, ValueError, KeyError):
             return AssocMeta(last_run_at=None, signals_since_last_run=0)
 
     def increment(self, base_dir: Optional[Path] = None) -> None:
@@ -41,6 +41,7 @@ class AssocMeta:
 
     def _save(self, base_dir: Optional[Path] = None) -> None:
         path = (base_dir or get_base_dir()) / _FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
             "last_run_at": self.last_run_at,
             "signals_since_last_run": self.signals_since_last_run,
