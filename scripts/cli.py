@@ -352,7 +352,13 @@ class AdaptivePreferenceCLI:
                     pref.tier = new_tier
                 pref.last_updated = now
                 self.storage.preferences.save_preference(pref)
-    
+
+        base_dir = getattr(self.storage, 'base_dir', None)
+        meta = AssocMeta.load(base_dir)
+        meta.increment(base_dir)
+        if meta.signals_since_last_run >= 10:
+            _run_assoc_generate(self.storage, base_dir)
+
     def cmd_signal_feedback(self, args):
         """Process a feedback signal"""
         signal = self.processor.process_feedback(
@@ -386,7 +392,13 @@ class AdaptivePreferenceCLI:
                     pref.tier = new_tier
                 pref.last_updated = now
                 self.storage.preferences.save_preference(pref)
-    
+
+        base_dir = getattr(self.storage, 'base_dir', None)
+        meta = AssocMeta.load(base_dir)
+        meta.increment(base_dir)
+        if meta.signals_since_last_run >= 10:
+            _run_assoc_generate(self.storage, base_dir)
+
     # ---- Loading / Display ----
     
     def cmd_load_preferences(self, args):

@@ -2,10 +2,12 @@ import io
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from datetime import datetime
 
+from scripts.assoc_meta import AssocMeta
 from scripts.cli import AdaptivePreferenceCLI
 from scripts.models import Preference, Signal, generate_id
 
@@ -103,3 +105,30 @@ class TestAssocGenerate(unittest.TestCase):
 
             assocs = cli.storage.associations.get_all_associations()
             self.assertGreater(len(assocs), 0)
+
+    def test_signal_threshold_triggers_assoc_generate(self):
+        with TemporaryDirectory() as tmpdir:
+            cli = self._make_cli(tmpdir)
+
+            # Manually add 9 signals + increment counter = 9 pending
+            for _ in range(9):
+                self._add_signal_with_both_prefs(cli)
+                meta = AssocMeta.load(Path(tmpdir))
+                meta.increment(Path(tmpdir))
+
+            # Counter should be 9 now (not yet at threshold)
+            meta = AssocMeta.load(Path(tmpdir))
+            self.assertEqual(meta.signals_since_last_run, 9)
+            self.assertEqual(len(cli.storage.associations.get_all_associations()), 0)
+
+            # Simulate the threshold check that signal commands perform
+            from scripts.cli import _run_assoc_generate
+            meta.increment(Path(tmpdir))  # now 10
+            meta2 = AssocMeta.load(Path(tmpdir))
+            if meta2.signals_since_last_run >= 10:
+                _run_assoc_generate(cli.storage, Path(tmpdir))
+
+            assocs = cli.storage.associations.get_all_associations()
+            self.assertGreater(len(assocs), 0)
+            meta3 = AssocMeta.load(Path(tmpdir))
+            self.assertEqual(meta3.signals_since_last_run, 0)
