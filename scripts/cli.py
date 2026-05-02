@@ -54,7 +54,7 @@ def _run_assoc_generate(storage, base_dir=None):
                 continue
             if pref_a not in pref_ids or pref_b not in pref_ids:
                 continue
-            key = tuple(sorted([pref_a, pref_b]))
+            key = (min(pref_a, pref_b), max(pref_a, pref_b))
             existing_assoc = existing.get(key) or existing.get((key[1], key[0]))
             if existing_assoc:
                 existing_assoc.strength_forward = score
@@ -74,11 +74,9 @@ def _run_assoc_generate(storage, base_dir=None):
                 )
                 storage.associations.save_association(assoc)
                 new_count += 1
-        meta = AssocMeta.load(base_dir)
-        meta.reset(base_dir)
+        AssocMeta(last_run_at=None, signals_since_last_run=0).reset(base_dir)
         return new_count, updated_count
     except Exception as e:
-        import sys
         print(f"assoc generate: {e}", file=sys.stderr)
         return 0, 0
 

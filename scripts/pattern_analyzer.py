@@ -47,7 +47,7 @@ class AffinityCalculator:
                 for j in range(i+1, len(prefs_list)):
                     pref_a, pref_b = prefs_list[i], prefs_list[j]
                     # Always store in sorted order for consistency
-                    pair = tuple(sorted([pref_a, pref_b]))
+                    pair = (min(pref_a, pref_b), max(pref_a, pref_b))
                     co_occurrences[pair] += 1
         
         # Calculate affinities
@@ -204,7 +204,7 @@ class ClusterAnalyzer:
         
         for i, pref_a in enumerate(members_list):
             for pref_b in members_list[i+1:]:
-                pair = tuple(sorted([pref_a, pref_b]))
+                pair = (min(pref_a, pref_b), max(pref_a, pref_b))
                 if pref_b in affinity_matrix.get(pref_a, {}):
                     strengths.append(affinity_matrix[pref_a][pref_b])
         
