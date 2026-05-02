@@ -29,11 +29,56 @@ from scripts.storage import ConfidentialStorageManager
 from scripts.preference_templates import list_templates, get_template
 from scripts.onboarding import OnboardingSystem
 from scripts.cli_utils import success, error, warn
+from scripts.assoc_meta import AssocMeta
+from scripts.pattern_analyzer import AffinityCalculator
+from adaptive_preference_engine.models import Association as AssociationModel
 
 # Behavior system constants
 _BEHAVIOR_PLATFORMS = ["any", "github", "gitlab", "bitbucket", "azure-devops", "gitea"]
 _BEHAVIOR_HOOK_EVENTS = ["PostToolUse", "PreToolUse", "SessionStart", "Stop", "none"]
 _BEHAVIOR_MATCHERS = ["Bash", "Write", "Edit", "Read", "Glob", "Grep", "other"]
+
+
+def _run_assoc_generate(storage, base_dir=None):
+    try:
+        calculator = AffinityCalculator(storage)
+        affinities = calculator.calculate_all_affinities()
+        pref_ids = {p.id for p in storage.preferences.get_all_preferences()}
+        existing = {
+            (a.from_id, a.to_id): a
+            for a in storage.associations.get_all_associations()
+        }
+        new_count = updated_count = 0
+        for (pref_a, pref_b), score in affinities.items():
+            if score < 0.1:
+                continue
+            if pref_a not in pref_ids or pref_b not in pref_ids:
+                continue
+            key = (min(pref_a, pref_b), max(pref_a, pref_b))
+            existing_assoc = existing.get(key) or existing.get((key[1], key[0]))
+            if existing_assoc:
+                existing_assoc.strength_forward = score
+                existing_assoc.strength_backward = score
+                storage.associations.save_association(existing_assoc)
+                updated_count += 1
+            else:
+                assoc = AssociationModel(
+                    id=generate_id("assoc"),
+                    from_id=key[0],
+                    to_id=key[1],
+                    association_type="correlation",
+                    bidirectional=True,
+                    strength_forward=score,
+                    strength_backward=score,
+                    description="auto-generated from co-occurrence",
+                )
+                storage.associations.save_association(assoc)
+                new_count += 1
+        AssocMeta(last_run_at=None, signals_since_last_run=0).reset(base_dir)
+        return new_count, updated_count
+    except Exception as e:
+        print(f"assoc generate: {e}", file=sys.stderr)
+        return 0, 0
 
 
 class AdaptivePreferenceCLI:
@@ -146,7 +191,16 @@ class AdaptivePreferenceCLI:
             print(f"   Value: {pref.value} | Confidence: {pref.confidence:.0%} | Uses: {pref.learning.use_count}")
     
     # ---- Association Management ----
-    
+
+    def cmd_assoc_generate(self, args):
+        base_dir = getattr(self.storage, 'base_dir', None)
+        if getattr(args, 'if_stale', False):
+            meta = AssocMeta.load(base_dir)
+            if not meta.is_stale:
+                return
+        new_count, updated_count = _run_assoc_generate(self.storage, base_dir)
+        print(f"Generated {new_count + updated_count} associations ({new_count} new, {updated_count} updated)")
+
     def cmd_create_association(self, args):
         """Create an association between two preferences"""
         assoc = Association(
@@ -298,7 +352,13 @@ class AdaptivePreferenceCLI:
                     pref.tier = new_tier
                 pref.last_updated = now
                 self.storage.preferences.save_preference(pref)
-    
+
+        base_dir = getattr(self.storage, 'base_dir', None)
+        meta = AssocMeta.load(base_dir)
+        meta.increment(base_dir)
+        if meta.signals_since_last_run >= 10:
+            _run_assoc_generate(self.storage, base_dir)
+
     def cmd_signal_feedback(self, args):
         """Process a feedback signal"""
         signal = self.processor.process_feedback(
@@ -332,7 +392,13 @@ class AdaptivePreferenceCLI:
                     pref.tier = new_tier
                 pref.last_updated = now
                 self.storage.preferences.save_preference(pref)
-    
+
+        base_dir = getattr(self.storage, 'base_dir', None)
+        meta = AssocMeta.load(base_dir)
+        meta.increment(base_dir)
+        if meta.signals_since_last_run >= 10:
+            _run_assoc_generate(self.storage, base_dir)
+
     # ---- Loading / Display ----
     
     def cmd_load_preferences(self, args):
@@ -1592,6 +1658,7 @@ class AdaptivePreferenceCLI:
         for e, _, _ in candidates:
             self.storage.knowledge.archive_entry(e.id)
         print(f"Archived {len(candidates)} entries.")
+        _run_assoc_generate(self.storage, getattr(self.storage, 'base_dir', None))
 
     def cmd_knowledge_expire(self, args):
         """Archive expired entries from both public and confidential stores."""
@@ -1899,7 +1966,11 @@ Examples:
     
     show_assoc = assoc_sub.add_parser("show", help="Show associations")
     show_assoc.add_argument("pref_id")
-    
+
+    gen_assoc = assoc_sub.add_parser("generate", help="Generate associations from signal co-occurrences")
+    gen_assoc.add_argument("--if-stale", action="store_true", dest="if_stale",
+                           help="Skip if no new signals since last run")
+
     # Context commands
     ctx_parser = subparsers.add_parser("context", help="Manage contexts")
     ctx_sub = ctx_parser.add_subparsers(dest="subcommand")
@@ -2341,6 +2412,8 @@ Examples:
                 cli.cmd_create_association(args)
             elif args.subcommand == "show":
                 cli.cmd_show_associations(args)
+            elif args.subcommand == "generate":
+                cli.cmd_assoc_generate(args)
         
         elif args.command == "context":
             if args.subcommand == "create":

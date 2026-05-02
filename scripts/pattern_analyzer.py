@@ -9,10 +9,10 @@ from datetime import datetime
 from collections import defaultdict
 import json
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models import Signal, generate_id
-from storage import PreferenceStorageManager
+from scripts.models import Signal, generate_id
+from scripts.storage import PreferenceStorageManager
 
 
 class AffinityCalculator:
@@ -39,7 +39,7 @@ class AffinityCalculator:
         total_signals = len(signals)
         
         for signal in signals:
-            prefs_in_signal = set(signal.get("preferences_used", []))
+            prefs_in_signal = set(signal.preferences_used)
             
             # Count pairs
             prefs_list = sorted(list(prefs_in_signal))
@@ -47,7 +47,7 @@ class AffinityCalculator:
                 for j in range(i+1, len(prefs_list)):
                     pref_a, pref_b = prefs_list[i], prefs_list[j]
                     # Always store in sorted order for consistency
-                    pair = tuple(sorted([pref_a, pref_b]))
+                    pair = (min(pref_a, pref_b), max(pref_a, pref_b))
                     co_occurrences[pair] += 1
         
         # Calculate affinities
@@ -154,7 +154,7 @@ class ClusterAnalyzer:
                     # Calculate average affinity with cluster members
                     avg_affinity = 0
                     for member in cluster:
-                        pair = tuple(sorted([pref, member]))
+                        pair = (min(pref, member), max(pref, member))
                         if pair in affinities:
                             avg_affinity += affinities[pair]
                     
@@ -204,7 +204,7 @@ class ClusterAnalyzer:
         
         for i, pref_a in enumerate(members_list):
             for pref_b in members_list[i+1:]:
-                pair = tuple(sorted([pref_a, pref_b]))
+                pair = (min(pref_a, pref_b), max(pref_a, pref_b))
                 if pref_b in affinity_matrix.get(pref_a, {}):
                     strengths.append(affinity_matrix[pref_a][pref_b])
         
@@ -215,7 +215,7 @@ class ClusterAnalyzer:
         co_occurrence_count = 0
         
         for signal in signals:
-            prefs = set(signal.get("preferences_used", []))
+            prefs = set(signal.preferences_used)
             if cluster.issubset(prefs):
                 co_occurrence_count += 1
         
