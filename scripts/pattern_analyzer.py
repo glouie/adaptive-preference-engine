@@ -39,7 +39,7 @@ class AffinityCalculator:
         total_signals = len(signals)
         
         for signal in signals:
-            prefs_in_signal = set(signal.get("preferences_used", []))
+            prefs_in_signal = set(signal.preferences_used if hasattr(signal, "preferences_used") else signal.get("preferences_used", []))
             
             # Count pairs
             prefs_list = sorted(list(prefs_in_signal))
@@ -215,7 +215,7 @@ class ClusterAnalyzer:
         co_occurrence_count = 0
         
         for signal in signals:
-            prefs = set(signal.get("preferences_used", []))
+            prefs = set(signal.preferences_used if hasattr(signal, "preferences_used") else signal.get("preferences_used", []))
             if cluster.issubset(prefs):
                 co_occurrence_count += 1
         
